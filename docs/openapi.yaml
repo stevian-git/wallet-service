@@ -1,0 +1,833 @@
+openapi: 3.0.3
+info:
+  title: Mini Ledger & Wallet API
+  version: 0.1.0
+  description: |
+    API wallet berbasis double-entry ledger.
+
+    Aturan umum:
+    - Semua nominal adalah integer dalam minor unit (IDR: exponent 0, 15000 = Rp15.000).
+    - Semua endpoint yang mengubah uang WAJIB memakai header `Idempotency-Key`.
+      Key yang sama dengan body yang sama mengembalikan respons semula (header `Idempotent-Replayed: true`).
+      Key yang sama dengan body berbeda menghasilkan 422. Request yang masih berjalan menghasilkan 409.
+    - Error memakai format RFC 7807 (`application/problem+json`).
+    - Pagination memakai cursor, bukan offset.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: Accounts
+  - name: Transfers
+  - name: Holds
+  - name: Reconciliation
+  - name: Admin
+  - name: Ops
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /v1/accounts:
+    post:
+      tags: [Accounts]
+      summary: Buat akun wallet
+      operationId: createAccount
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAccountRequest'
+      responses:
+        '201':
+          description: Akun dibuat
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/accounts/{accountId}:
+    get:
+      tags: [Accounts]
+      summary: Detail akun
+      operationId: getAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/accounts/{accountId}/balance:
+    get:
+      tags: [Accounts]
+      summary: Saldo akun (posted, held, available)
+      operationId: getBalance
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Balance'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/accounts/{accountId}/entries:
+    get:
+      tags: [Accounts]
+      summary: Mutasi akun (ledger entries), terbaru lebih dulu
+      operationId: listEntries
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Cursor opaque dari respons sebelumnya
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LedgerEntry'
+                  next_cursor:
+                    type: string
+                    nullable: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/topups:
+    post:
+      tags: [Transfers]
+      summary: Top-up wallet (debit bank, kredit wallet)
+      operationId: createTopup
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TopupRequest'
+      responses:
+        '201':
+          description: Top-up diposting
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/transfers:
+    post:
+      tags: [Transfers]
+      summary: Transfer antar wallet
+      operationId: createTransfer
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+      responses:
+        '201':
+          description: Transfer diposting
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/withdrawals:
+    post:
+      tags: [Transfers]
+      summary: Tarik dana (debit wallet, kredit bank)
+      operationId: createWithdrawal
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WithdrawalRequest'
+      responses:
+        '201':
+          description: Penarikan diposting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/transfers/{transferId}:
+    get:
+      tags: [Transfers]
+      summary: Detail transfer beserta entri ledgernya
+      operationId: getTransfer
+      parameters:
+        - $ref: '#/components/parameters/TransferId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/transfers/{transferId}/reversal:
+    post:
+      tags: [Transfers]
+      summary: Reverse transfer (membuat transfer kompensasi, ledger asli tidak diubah)
+      operationId: reverseTransfer
+      parameters:
+        - $ref: '#/components/parameters/TransferId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+      responses:
+        '201':
+          description: Reversal diposting
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Transfer sudah pernah di-reverse
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/holds:
+    post:
+      tags: [Holds]
+      summary: Tahan dana (authorize)
+      operationId: createHold
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateHoldRequest'
+      responses:
+        '201':
+          description: Dana ditahan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/holds/{holdId}:
+    get:
+      tags: [Holds]
+      summary: Detail hold
+      operationId: getHold
+      parameters:
+        - $ref: '#/components/parameters/HoldId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/holds/{holdId}/capture:
+    post:
+      tags: [Holds]
+      summary: Capture hold ke akun tujuan (boleh lebih kecil dari nominal hold)
+      operationId: captureHold
+      parameters:
+        - $ref: '#/components/parameters/HoldId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [destination_account_id]
+              properties:
+                destination_account_id:
+                  type: string
+                  format: uuid
+                amount:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: Default = nominal hold penuh. Sisa dana otomatis dilepas.
+      responses:
+        '201':
+          description: Hold di-capture
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/holds/{holdId}/release:
+    post:
+      tags: [Holds]
+      summary: Lepas hold
+      operationId: releaseHold
+      parameters:
+        - $ref: '#/components/parameters/HoldId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Hold dilepas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/reconciliation/settlement-files:
+    post:
+      tags: [Reconciliation]
+      summary: Impor file settlement dari provider (CSV)
+      operationId: importSettlementFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [provider, settlement_date, file]
+              properties:
+                provider:
+                  type: string
+                  example: mock_bank_a
+                settlement_date:
+                  type: string
+                  format: date
+                file:
+                  type: string
+                  format: binary
+                  description: 'CSV dengan kolom: provider_ref, our_reference, amount, currency, status, occurred_at'
+      responses:
+        '201':
+          description: File diimpor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementFile'
+        '409':
+          description: File yang sama (sha256) sudah pernah diimpor
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /v1/reconciliation/runs:
+    post:
+      tags: [Reconciliation]
+      summary: Jalankan rekonsiliasi untuk satu file settlement
+      operationId: startReconciliation
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_id]
+              properties:
+                file_id:
+                  type: string
+                  format: uuid
+      responses:
+        '202':
+          description: Run dimulai
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconciliationRun'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/reconciliation/runs/{runId}:
+    get:
+      tags: [Reconciliation]
+      summary: Status dan ringkasan run
+      operationId: getReconciliationRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconciliationRun'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/reconciliation/runs/{runId}/discrepancies:
+    get:
+      tags: [Reconciliation]
+      summary: Daftar selisih pada satu run
+      operationId: listDiscrepancies
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolution
+          in: query
+          schema: { type: string, enum: [open, resolved, ignored] }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Discrepancy'
+                  next_cursor:
+                    type: string
+                    nullable: true
+
+  /v1/admin/integrity:
+    get:
+      tags: [Admin]
+      summary: Cek invariant ledger (saldo drift, transfer tidak seimbang)
+      operationId: checkIntegrity
+      responses:
+        '200':
+          description: Hasil pengecekan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrityReport'
+
+  /healthz:
+    get:
+      tags: [Ops]
+      summary: Liveness
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: OK
+
+  /readyz:
+    get:
+      tags: [Ops]
+      summary: Readiness (cek koneksi database)
+      operationId: readyz
+      security: []
+      responses:
+        '200':
+          description: Siap
+        '503':
+          description: Belum siap
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  headers:
+    IdempotentReplayed:
+      description: "'true' jika respons ini adalah replay dari request sebelumnya"
+      schema:
+        type: string
+        enum: ['true']
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: String unik per operasi (disarankan UUIDv4), maksimal 255 karakter
+      schema:
+        type: string
+        maxLength: 255
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TransferId:
+      name: transferId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    HoldId:
+      name: holdId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    NotFound:
+      description: Resource tidak ditemukan
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: Idempotency-Key masih diproses, atau state resource tidak mengizinkan operasi
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unprocessable:
+      description: Validasi gagal, saldo tidak cukup, akun frozen, atau Idempotency-Key dipakai ulang dengan body berbeda
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          example: https://ledger.example/problems/insufficient-funds
+        title:
+          type: string
+          example: Insufficient funds
+        status:
+          type: integer
+          example: 422
+        detail:
+          type: string
+        code:
+          type: string
+          description: Kode stabil untuk mesin
+          enum:
+            - validation_failed
+            - insufficient_funds
+            - account_frozen
+            - currency_mismatch
+            - idempotency_key_reused
+            - idempotency_in_progress
+            - already_reversed
+            - hold_not_active
+            - hold_expired
+            - not_found
+        request_id:
+          type: string
+
+    CreateAccountRequest:
+      type: object
+      required: [owner_ref, currency]
+      properties:
+        owner_ref:
+          type: string
+          maxLength: 128
+        kind:
+          type: string
+          enum: [user_wallet, merchant]
+          default: user_wallet
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          example: IDR
+
+    Account:
+      type: object
+      required: [id, kind, owner_ref, currency, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [user_wallet, merchant, system_bank, system_fee, system_suspense] }
+        owner_ref: { type: string }
+        currency: { type: string }
+        status: { type: string, enum: [active, frozen, closed] }
+        created_at: { type: string, format: date-time }
+
+    Balance:
+      type: object
+      required: [account_id, currency, posted, held, available, as_of]
+      properties:
+        account_id: { type: string, format: uuid }
+        currency: { type: string }
+        posted: { type: integer, format: int64 }
+        held: { type: integer, format: int64 }
+        available:
+          type: integer
+          format: int64
+          description: posted - held
+        as_of: { type: string, format: date-time }
+
+    TopupRequest:
+      type: object
+      required: [destination_account_id, amount, currency]
+      properties:
+        destination_account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        reference:
+          type: string
+          description: Referensi dari provider (dipakai saat rekonsiliasi)
+        metadata: { type: object, additionalProperties: true }
+
+    TransferRequest:
+      type: object
+      required: [source_account_id, destination_account_id, amount, currency]
+      properties:
+        source_account_id: { type: string, format: uuid }
+        destination_account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        reference: { type: string }
+        metadata: { type: object, additionalProperties: true }
+
+    WithdrawalRequest:
+      type: object
+      required: [source_account_id, amount, currency]
+      properties:
+        source_account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        reference: { type: string }
+        metadata: { type: object, additionalProperties: true }
+
+    Transfer:
+      type: object
+      required: [id, type, status, amount, currency, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [topup, transfer, withdrawal, hold_capture, reversal] }
+        status: { type: string, enum: [pending, posted, failed] }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        source_account_id: { type: string, format: uuid, nullable: true }
+        destination_account_id: { type: string, format: uuid, nullable: true }
+        reference: { type: string, nullable: true }
+        reverses_transfer_id: { type: string, format: uuid, nullable: true }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        posted_at: { type: string, format: date-time, nullable: true }
+
+    TransferDetail:
+      allOf:
+        - $ref: '#/components/schemas/Transfer'
+        - type: object
+          required: [entries]
+          properties:
+            entries:
+              type: array
+              items:
+                $ref: '#/components/schemas/LedgerEntry'
+
+    LedgerEntry:
+      type: object
+      required: [id, transfer_id, account_id, direction, amount, currency, balance_after, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        transfer_id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        direction: { type: string, enum: [debit, credit] }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        balance_after: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+
+    CreateHoldRequest:
+      type: object
+      required: [account_id, amount, currency, ttl_seconds]
+      properties:
+        account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        ttl_seconds: { type: integer, minimum: 1, maximum: 604800 }
+        reference: { type: string }
+
+    Hold:
+      type: object
+      required: [id, account_id, amount, currency, status, expires_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        status: { type: string, enum: [active, captured, released, expired] }
+        reference: { type: string, nullable: true }
+        transfer_id: { type: string, format: uuid, nullable: true }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+
+    SettlementFile:
+      type: object
+      required: [id, provider, file_name, settlement_date, record_count, imported_at]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string }
+        file_name: { type: string }
+        settlement_date: { type: string, format: date }
+        record_count: { type: integer }
+        imported_at: { type: string, format: date-time }
+
+    ReconciliationRun:
+      type: object
+      required: [id, file_id, status, started_at, matched_count, discrepancy_count]
+      properties:
+        id: { type: string, format: uuid }
+        file_id: { type: string, format: uuid }
+        status: { type: string, enum: [running, completed, failed] }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        matched_count: { type: integer }
+        discrepancy_count: { type: integer }
+        error: { type: string, nullable: true }
+
+    Discrepancy:
+      type: object
+      required: [id, run_id, kind, resolution, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        run_id: { type: string, format: uuid }
+        kind:
+          type: string
+          enum: [missing_in_ledger, missing_in_settlement, amount_mismatch, status_mismatch, duplicate_in_settlement]
+        transfer_id: { type: string, format: uuid, nullable: true }
+        settlement_record_id: { type: integer, format: int64, nullable: true }
+        expected_amount: { type: integer, format: int64, nullable: true }
+        actual_amount: { type: integer, format: int64, nullable: true }
+        resolution: { type: string, enum: [open, resolved, ignored] }
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    IntegrityReport:
+      type: object
+      required: [ok, checked_at, balance_drift, unbalanced_transfers, posted_without_entries]
+      properties:
+        ok: { type: boolean }
+        checked_at: { type: string, format: date-time }
+        balance_drift:
+          type: array
+          items:
+            type: object
+            properties:
+              account_id: { type: string, format: uuid }
+              cached_posted: { type: integer, format: int64 }
+              derived_posted: { type: integer, format: int64 }
+        unbalanced_transfers:
+          type: array
+          items:
+            type: object
+            properties:
+              transfer_id: { type: string, format: uuid }
+              total_debit: { type: integer, format: int64 }
+              total_credit: { type: integer, format: int64 }
+        posted_without_entries:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+# ---------------------------------------------------------------------------
+# Event yang dipublikasikan lewat outbox (Kafka topic: ledger.events.v1,
+# key = aggregate_id). Bukan bagian dari HTTP API, dicatat di sini sebagai kontrak.
+#   transfer.posted      { transfer_id, type, amount, currency, source_account_id, destination_account_id, reference }
+#   transfer.reversed    { transfer_id, reverses_transfer_id, amount, currency }
+#   hold.created         { hold_id, account_id, amount, currency, expires_at }
+#   hold.captured        { hold_id, transfer_id, amount }
+#   hold.released        { hold_id }
+#   hold.expired         { hold_id }
+#   account.created      { account_id, owner_ref, currency }
+# Header event: event_id, schema_version, traceparent.
+# Consumer WAJIB idempoten (dedupe berdasarkan event_id).
+# ---------------------------------------------------------------------------
