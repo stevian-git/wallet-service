@@ -17,5 +17,39 @@ services:
       timeout: 3s
       retries: 30
 
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.2.4
+    container_name: wallet-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://localhost:${KAFKA_PORT:-9092}
+    environment:
+      RPK_BROKERS: 127.0.0.1:9092
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+      - "${REDPANDA_ADMIN_PORT:-9644}:9644"
+    volumes:
+      - wallet_redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: [ "CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'" ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
 volumes:
   wallet_pgdata:
+  wallet_redpanda:

@@ -48,6 +48,10 @@ func From(err error) *Error {
 		return &Error{Status: http.StatusUnprocessableEntity, Code: "currency_mismatch", Title: "Currency mismatch"}
 	case errors.Is(err, ledger.ErrAlreadyReversed):
 		return &Error{Status: http.StatusConflict, Code: "already_reversed", Title: "Transfer already reversed"}
+	case errors.Is(err, ledger.ErrHoldNotActive):
+		return &Error{Status: http.StatusConflict, Code: "hold_not_active", Title: "Hold is not active", Detail: err.Error()}
+	case errors.Is(err, ledger.ErrHoldExpired):
+		return &Error{Status: http.StatusConflict, Code: "hold_expired", Title: "Hold expired"}
 	case errors.Is(err, ledger.ErrAccountExists):
 		return &Error{Status: http.StatusConflict, Title: "Account already exists", Slug: "account-exists"}
 	case errors.Is(err, ledger.ErrInvalidAmount),

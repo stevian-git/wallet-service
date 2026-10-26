@@ -31,6 +31,15 @@ const (
 	DirectionCredit Direction = "credit"
 )
 
+type HoldStatus string
+
+const (
+	HoldStatusActive   HoldStatus = "active"
+	HoldStatusCaptured HoldStatus = "captured"
+	HoldStatusReleased HoldStatus = "released"
+	HoldStatusExpired  HoldStatus = "expired"
+)
+
 type TransferType string
 
 const (
@@ -100,6 +109,19 @@ type TransferDetail struct {
 	Entries []Entry
 }
 
+type Hold struct {
+	ID         uuid.UUID
+	AccountID  uuid.UUID
+	Amount     int64
+	Currency   string
+	Status     HoldStatus
+	Reference  *string
+	ExpiresAt  time.Time
+	TransferID *uuid.UUID
+	CreatedAt  time.Time
+	ResolvedAt *time.Time
+}
+
 type CreateAccountInput struct {
 	OwnerRef string
 	Kind     AccountKind
@@ -129,6 +151,20 @@ type WithdrawalInput struct {
 	Currency        string
 	Reference       *string
 	Metadata        json.RawMessage
+}
+
+type CreateHoldInput struct {
+	AccountID  uuid.UUID
+	Amount     int64
+	Currency   string
+	TTLSeconds int64
+	Reference  *string
+}
+
+type CaptureHoldInput struct {
+	HoldID               uuid.UUID
+	DestinationAccountID uuid.UUID
+	Amount               int64
 }
 
 type PostingEntry struct {

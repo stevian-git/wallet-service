@@ -44,6 +44,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/withdrawals", s.handleWithdrawal)
 	mux.HandleFunc("GET /v1/transfers/{transferId}", s.handleGetTransfer)
 	mux.HandleFunc("POST /v1/transfers/{transferId}/reversal", s.handleReverseTransfer)
+	mux.HandleFunc("POST /v1/holds", s.handleCreateHold)
+	mux.HandleFunc("GET /v1/holds/{holdId}", s.handleGetHold)
+	mux.HandleFunc("POST /v1/holds/{holdId}/capture", s.handleCaptureHold)
+	mux.HandleFunc("POST /v1/holds/{holdId}/release", s.handleReleaseHold)
 	mux.HandleFunc("GET /v1/admin/integrity", s.handleIntegrity)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleReady)
@@ -331,6 +335,67 @@ func (s *Server) handleReverseTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.app.ReverseTransfer(r.Context(), s.meta(r, raw), transferID, request)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeResult(w, result)
+}
+
+func (s *Server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
+	body, err := readRequiredJSON[app.CreateHoldRequest](s, r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	result, err := s.app.CreateHold(r.Context(), s.meta(r, body.Raw), body.Request)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeResult(w, result)
+}
+
+func (s *Server) handleGetHold(w http.ResponseWriter, r *http.Request) {
+	holdID, err := pathUUID(r, "holdId")
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	view, err := s.app.GetHold(r.Context(), holdID)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleCaptureHold(w http.ResponseWriter, r *http.Request) {
+	holdID, err := pathUUID(r, "holdId")
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	body, err := readRequiredJSON[app.CaptureHoldRequest](s, r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	result, err := s.app.CaptureHold(r.Context(), s.meta(r, body.Raw), holdID, body.Request)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeResult(w, result)
+}
+
+func (s *Server) handleReleaseHold(w http.ResponseWriter, r *http.Request) {
+	holdID, err := pathUUID(r, "holdId")
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	result, err := s.app.ReleaseHold(r.Context(), s.meta(r, nil), holdID)
 	if err != nil {
 		s.writeProblem(w, r, err)
 		return

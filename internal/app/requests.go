@@ -71,3 +71,16 @@ func normalizeMetadata(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	return trimmed, nil
 }
+
+type CreateHoldRequest struct {
+	AccountID  uuid.UUID `json:"account_id"`
+	Amount     int64     `json:"amount"`
+	Currency   string    `json:"currency"`
+	TTLSeconds int64     `json:"ttl_seconds"`
+	Reference  *string   `json:"reference"`
+}
+
+type CaptureHoldRequest struct {
+	DestinationAccountID uuid.UUID `json:"destination_account_id"`
+	Amount               int64     `json:"amount"`
+}

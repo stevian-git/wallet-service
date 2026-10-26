@@ -210,3 +210,31 @@ func decodeCursor(cursor string) (*int64, error) {
 	}
 	return &id, nil
 }
+
+type HoldView struct {
+	ID         uuid.UUID         `json:"id"`
+	AccountID  uuid.UUID         `json:"account_id"`
+	Amount     int64             `json:"amount"`
+	Currency   string            `json:"currency"`
+	Status     ledger.HoldStatus `json:"status"`
+	Reference  *string           `json:"reference"`
+	TransferID *uuid.UUID        `json:"transfer_id"`
+	ExpiresAt  time.Time         `json:"expires_at"`
+	CreatedAt  time.Time         `json:"created_at"`
+	ResolvedAt *time.Time        `json:"resolved_at"`
+}
+
+func holdView(hold ledger.Hold) HoldView {
+	return HoldView{
+		ID:         hold.ID,
+		AccountID:  hold.AccountID,
+		Amount:     hold.Amount,
+		Currency:   hold.Currency,
+		Status:     hold.Status,
+		Reference:  hold.Reference,
+		TransferID: hold.TransferID,
+		ExpiresAt:  hold.ExpiresAt,
+		CreatedAt:  hold.CreatedAt,
+		ResolvedAt: hold.ResolvedAt,
+	}
+}

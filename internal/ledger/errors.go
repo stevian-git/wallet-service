@@ -13,4 +13,6 @@ var (
 	ErrAccountExists     = errors.New("account already exists")
 	ErrAlreadyReversed   = errors.New("transfer already reversed")
 	ErrNoTransaction     = errors.New("no transaction")
+	ErrHoldNotActive     = errors.New("hold is not active")
+	ErrHoldExpired       = errors.New("hold expired")
 )

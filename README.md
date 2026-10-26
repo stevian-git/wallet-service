@@ -8,24 +8,30 @@ posting path.
 
 - Accounts: create, read, balance, and cursor-paginated ledger entries.
 - Money movements: top-up, wallet-to-wallet transfer, withdrawal, and reversal.
+- Holds: create, read, partial/full capture, release, and background expiry.
 - One posting path (`internal/ledger.Post`) with balanced-entry validation.
 - Deterministic balance-row locking and an `account_balances` cache updated in
   the same transaction as `ledger_entries`.
 - Idempotency for every money-moving endpoint (accounts, top-ups, transfers,
-  withdrawals, reversals):
+  withdrawals, reversals, holds, capture, and release):
   - same key + same body = replayed response;
   - same key + different body = `422`;
   - in-flight duplicate = `409`.
 - RFC 7807 `application/problem+json` errors.
-- Transactional outbox rows for `account.created`, `transfer.posted`, and
-  `transfer.reversed`.
+- Transactional outbox rows for `account.created`, `transfer.posted`,
+  `transfer.reversed`, `hold.created`, `hold.captured`, `hold.released`, and
+  `hold.expired`.
+- Outbox relay to Kafka (`cmd/relay`) with per-aggregate ordering, durable
+  retry state, and `FOR UPDATE SKIP LOCKED` claiming for multiple instances.
+- Demo Kafka consumer (`cmd/consumer-demo`) with `event_id` dedupe.
+- Hold expiry worker (`cmd/holdsweeper`) safe to run as multiple instances.
 - `GET /v1/admin/integrity` backed by the schema's read-only integrity views.
 - Append-only enforcement through database privileges and a startup role check.
-- Integration tests against real PostgreSQL via testcontainers.
+- Integration tests against real PostgreSQL and Redpanda via testcontainers.
 
-Not yet implemented: holds, reconciliation/import, Kafka relay/consumer,
-metrics, and distributed tracing. The HTTP contract for holds and
-reconciliation is documented in `docs/openapi.yaml`.
+Not yet implemented: reconciliation/import, metrics, and distributed tracing.
+The HTTP contract for holds and reconciliation is documented in
+`docs/openapi.yaml`.
 
 ## Quick start
 
@@ -34,13 +40,22 @@ Requirements: Go 1.25+, Docker.
 ```bash
 cp .env.example .env
 
-make up          # PostgreSQL 16 on :5436
+make up          # PostgreSQL 16 on :5436 and Redpanda on :9092
 make migrate     # run migrations as ledger_migrator
+make kafka-topic # optional: create ledger.events.v1 with 3 partitions
 make run         # start the API with the ledger_app role
 ```
 
 The API listens on `:8080` by default. `make run` uses the development API key
 `dev_api_key`.
+
+Run the background processes in separate terminals:
+
+```bash
+make holdsweeper   # expire due holds every 5s
+make relay         # publish outbox rows to Kafka
+make consumer-demo # print and dedupe events
+```
 
 ```bash
 curl -s http://localhost:8080/healthz
@@ -63,6 +78,35 @@ curl -s -X POST http://localhost:8080/v1/topups \
   -d '{"destination_account_id":"ACCOUNT_ID","amount":100000,"currency":"IDR"}'
 ```
 
+Authorize part of the balance as a hold:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/holds \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev_api_key' \
+  -H 'Idempotency-Key: hold-1' \
+  -d '{"account_id":"ACCOUNT_ID","amount":30000,"currency":"IDR","ttl_seconds":300,"reference":"order-1"}'
+```
+
+Capture less than the hold (`amount` omitted or `0` captures the full hold; the
+remainder is released automatically):
+
+```bash
+curl -s -X POST http://localhost:8080/v1/holds/HOLD_ID/capture \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev_api_key' \
+  -H 'Idempotency-Key: capture-1' \
+  -d '{"destination_account_id":"DESTINATION_ACCOUNT_ID","amount":20000}'
+```
+
+Release it instead:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/holds/HOLD_ID/release \
+  -H 'X-API-Key: dev_api_key' \
+  -H 'Idempotency-Key: release-1'
+```
+
 Retrying the same request with the same `Idempotency-Key` and body returns the
 original response and sets `Idempotent-Replayed: true`.
 
@@ -72,19 +116,24 @@ original response and sets `Idempotent-Replayed: true`.
 make test
 ```
 
-Tests start a disposable PostgreSQL 16 container. Docker must be running. The
-suite covers:
+Tests start disposable PostgreSQL 16 and Redpanda containers. Docker must be
+running. The suite covers:
 
-- the ledger happy path, reversal, and double-reversal rejection;
-- append-only database privileges;
+- the ledger happy path, reversal, double-reversal rejection, and append-only
+  database privileges;
 - insufficient funds leaving no partial ledger or outbox writes;
-- concurrent transfers without overdraft or balance-cache drift;
+- concurrent transfers and holds without overdraft or balance-cache drift;
+- hold partial capture, release, expiry, and expired-capture rejection;
 - idempotency replay, key reuse, in-flight conflicts, and transient retries;
-- the HTTP contract end to end, including problem responses and pagination.
+- the HTTP contract end to end, including holds, problem responses, and
+  pagination;
+- outbox relay ordering, mid-batch failure recovery, and two relays without
+  duplicate publication;
+- Kafka producer key/headers/payload and consumer dedupe TTL/cap behavior.
 
 ## Database roles
 
-The API never connects as the schema owner.
+The API, relay, and sweeper never connect as the schema owner.
 
 - `ledger_migrator`: owns the schema and runs migrations.
 - `ledger_app`: runtime role with only `SELECT`/`INSERT` on append-only tables
@@ -99,8 +148,13 @@ superuser or as a role that can mutate append-only tables.
 ```text
 cmd/api              HTTP server wiring
 cmd/migrate          migration CLI
-internal/ledger      posting, balances, reversal, integrity views
+cmd/holdsweeper      hold expiry worker
+cmd/relay            outbox -> Kafka relay
+cmd/consumer-demo    demo Kafka consumer with event_id dedupe
+internal/ledger      posting, balances, holds, reversal, integrity views
 internal/idempotency idempotency reservation/replay service
+internal/outbox      outbox claiming, relay, Kafka publisher
+internal/consumer    demo consumer dedupe
 internal/app         application orchestration and response views
 internal/httpapi     routing, middleware, problem+json responses
 internal/problem     domain error -> RFC 7807 mapping
@@ -117,12 +171,34 @@ docs/                schema, OpenAPI contract, ADRs
   deleted.
 - Balance changes and ledger entries share one transaction. Accounts are locked
   with `ORDER BY account_id ... FOR UPDATE`.
+- Holds reduce available balance (`posted - held`) without posting. Capture
+  posts exactly the captured amount and releases the remainder. See
+  `docs/adr/0005-lock-ordering-vs-optimistic-locking.md`.
 - The `account_balances` check constraint is only a backstop. SQLSTATE `23514`
   is logged as an error and mapped to `ErrInsufficientFunds`.
 - Idempotency completion is written in the same transaction as the posting. See
   `docs/adr/0002-idempotency.md`.
+- Outbox rows are written in the ledger transaction and published later by the
+  relay. Delivery is at-least-once; consumers must dedupe by `event_id`. See
+  `docs/adr/0004-outbox-vs-dual-write.md`.
 - Database triggers and stored procedures are intentionally not used. See
   `docs/adr/0001-no-triggers-stored-procedures.md`.
+
+### Kafka event contract
+
+Topic: `ledger.events.v1` (default). Key: `aggregate_id`. Headers include
+`event_id`, `schema_version`, and any trace headers supplied by future
+instrumentation.
+
+```text
+account.created   { account_id, owner_ref, currency }
+transfer.posted   { transfer_id, type, amount, currency, source_account_id, destination_account_id, reference }
+transfer.reversed { transfer_id, reverses_transfer_id, amount, currency }
+hold.created      { hold_id, account_id, amount, currency, expires_at }
+hold.captured     { hold_id, transfer_id, amount }
+hold.released     { hold_id }
+hold.expired      { hold_id }
+```
 
 ### Current deviations from the original stack notes
 
