@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 type Event struct {
@@ -195,7 +196,8 @@ func (r *Relay) RunOnce(ctx context.Context) (int, error) {
 
 	published := 0
 	for _, event := range events {
-		if err := r.publisher.Publish(ctx, event); err != nil {
+		eventCtx := telemetry.ExtractTrace(ctx, event.Headers)
+		if err := r.publisher.Publish(eventCtx, event); err != nil {
 			failureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			markErr := r.store.MarkFailed(failureCtx, tx, event.ID, err)
 			commitErr := tx.Commit(failureCtx)

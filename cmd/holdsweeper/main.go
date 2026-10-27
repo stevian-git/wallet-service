@@ -13,6 +13,7 @@ import (
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/db"
 	"github.com/stevians/wallet-service/internal/platform/log"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 func main() {
@@ -24,6 +25,13 @@ func main() {
 
 	logger := log.New(cfg.LogLevel)
 	slog.SetDefault(logger)
+
+	tracing, err := telemetry.InitTracing(context.Background(), "wallet-holdsweeper")
+	if err != nil {
+		logger.Error("init tracing", "error", err)
+		os.Exit(1)
+	}
+	defer tracing.Shutdown(context.Background())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

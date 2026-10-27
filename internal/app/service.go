@@ -8,6 +8,7 @@ import (
 
 	"github.com/stevians/wallet-service/internal/idempotency"
 	"github.com/stevians/wallet-service/internal/ledger"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 	"github.com/stevians/wallet-service/internal/problem"
 	"github.com/stevians/wallet-service/internal/reconciliation"
 )
@@ -48,6 +49,9 @@ func (s *Service) do(ctx context.Context, meta Meta, work idempotency.Work) (Res
 	}, work, errorMapper(meta.RequestID))
 	if err != nil {
 		return Result{}, mapIdempotencyError(err)
+	}
+	if outcome.Replayed {
+		telemetry.RecordReplay(meta.Path)
 	}
 	return Result{
 		StatusCode: outcome.Response.StatusCode,

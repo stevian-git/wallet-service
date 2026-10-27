@@ -16,8 +16,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stevians/wallet-service/internal/app"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 	"github.com/stevians/wallet-service/internal/problem"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const maxBodyBytes = 1 << 20
@@ -53,11 +57,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/reconciliation/runs", s.handleCreateReconciliationRun)
 	mux.HandleFunc("GET /v1/reconciliation/runs/{runId}", s.handleGetReconciliationRun)
 	mux.HandleFunc("GET /v1/reconciliation/runs/{runId}/discrepancies", s.handleListDiscrepancies)
+	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("/", s.handleNotFound)
 
-	return s.withRequestID(s.withRecover(s.withLogging(s.withAuth(s.withBodyLimit(mux)))))
+	return s.withRequestID(s.withRecover(s.withTracing(s.withMetrics(s.withLogging(s.withAuth(s.withBodyLimit(mux)))))))
 }
 
 type requestIDContextKey struct{}
@@ -126,19 +131,47 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
+		sc := trace.SpanContextFromContext(r.Context())
 		s.log.Info("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", status,
 			"duration_ms", time.Since(started).Milliseconds(),
 			"request_id", requestIDFrom(r.Context()),
+			"trace_id", sc.TraceID().String(),
+			"span_id", sc.SpanID().String(),
 		)
+	})
+}
+
+func (s *Server) withTracing(next http.Handler) http.Handler {
+	return otelhttp.NewHandler(next, "wallet-api")
+}
+
+func (s *Server) withMetrics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		started := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		telemetry.RecordHTTP(r.Method, route, strconv.Itoa(status), time.Since(started))
 	})
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}

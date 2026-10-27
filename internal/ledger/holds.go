@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 const (
@@ -37,7 +38,9 @@ func (l *Ledger) CreateHold(ctx context.Context, tx pgx.Tx, input CreateHoldInpu
 		return Hold{}, fmt.Errorf("%w: reference must be at most 255 characters", ErrInvalidPosting)
 	}
 
+	lockStart := time.Now()
 	accounts, err := lockAccounts(ctx, tx, []uuid.UUID{input.AccountID})
+	telemetry.ObserveLockWait("hold_create", time.Since(lockStart))
 	if err != nil {
 		return Hold{}, err
 	}
@@ -147,7 +150,9 @@ func (l *Ledger) CaptureHold(ctx context.Context, tx pgx.Tx, input CaptureHoldIn
 		return Transfer{}, fmt.Errorf("%w: capture amount must be between 1 and hold amount", ErrInvalidPosting)
 	}
 
+	lockStart := time.Now()
 	accounts, err := lockAccounts(ctx, tx, []uuid.UUID{hold.AccountID, input.DestinationAccountID})
+	telemetry.ObserveLockWait("hold_capture", time.Since(lockStart))
 	if err != nil {
 		return Transfer{}, err
 	}

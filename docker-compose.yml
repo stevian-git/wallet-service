@@ -50,6 +50,47 @@ services:
       timeout: 5s
       retries: 30
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: wallet-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: wallet-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: wallet-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 volumes:
   wallet_pgdata:
   wallet_redpanda:

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 type lockedAccount struct {
@@ -42,7 +43,9 @@ func (l *Ledger) Post(ctx context.Context, tx pgx.Tx, req PostingRequest) (Trans
 		return accountIDs[i].String() < accountIDs[j].String()
 	})
 
+	lockStart := time.Now()
 	accounts, err := lockAccounts(ctx, tx, accountIDs)
+	telemetry.ObserveLockWait("post", time.Since(lockStart))
 	if err != nil {
 		return Transfer{}, err
 	}

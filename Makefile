@@ -18,16 +18,33 @@ OUTBOX_BATCH_SIZE ?= 50
 OUTBOX_POLL_INTERVAL ?= 1s
 OUTBOX_MAX_BACKOFF ?= 30s
 RECONCILER_POLL_INTERVAL ?= 5s
+VUS ?= 10
+DURATION ?= 30s
+BASE_URL ?= http://localhost:8080
 
-.PHONY: up up-db up-kafka down reset migrate migrate-down migrate-version test run relay consumer-demo holdsweeper reconciler mock-settlement kafka-topic build fmt vet
+.PHONY: up up-db up-kafka up-observability down reset migrate migrate-down migrate-version test run relay consumer-demo holdsweeper reconciler mock-settlement kafka-topic build fmt vet loadtest loadtest-hot chaos
 
-up: up-db up-kafka
+up: up-db up-kafka up-observability
 
 up-db:
 	docker compose up -d --wait postgres
 
 up-kafka:
 	docker compose up -d --wait redpanda
+
+up-observability:
+	docker compose up -d jaeger prometheus grafana
+
+loadtest:
+	mkdir -p results
+	BASE_URL='$(BASE_URL)' API_KEY='$(API_KEY)' VUS='$(VUS)' DURATION='$(DURATION)' k6 run deploy/k6/wallet.js
+
+loadtest-hot:
+	mkdir -p results
+	BASE_URL='$(BASE_URL)' API_KEY='$(API_KEY)' VUS='$(VUS)' DURATION='$(DURATION)' HOT=1 k6 run deploy/k6/wallet.js
+
+chaos: build up
+	./scripts/chaos.sh
 
 down:
 	docker compose down

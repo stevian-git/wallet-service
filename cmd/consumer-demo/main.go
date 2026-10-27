@@ -9,10 +9,14 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/stevians/wallet-service/internal/consumer"
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/log"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 func main() {
@@ -24,6 +28,13 @@ func main() {
 
 	logger := log.New(cfg.LogLevel)
 	slog.SetDefault(logger)
+
+	tracing, err := telemetry.InitTracing(context.Background(), "wallet-consumer-demo")
+	if err != nil {
+		logger.Error("init tracing", "error", err)
+		os.Exit(1)
+	}
+	defer tracing.Shutdown(context.Background())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -83,6 +94,23 @@ func main() {
 				return
 			}
 			dedupe.Add(eventID)
+
+			headers := make(map[string]string, len(record.Headers))
+			for _, h := range record.Headers {
+				headers[h.Key] = string(h.Value)
+			}
+			consumeCtx := telemetry.ExtractTrace(ctx, headers)
+			_, span := otel.Tracer("wallet.kafka").Start(consumeCtx, "kafka.consume",
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(
+					attribute.String("messaging.system", "kafka"),
+					attribute.String("messaging.destination.name", record.Topic),
+					attribute.Int64("messaging.kafka.partition", int64(record.Partition)),
+					attribute.Int64("messaging.kafka.offset", record.Offset),
+					attribute.String("wallet.event_id", eventID),
+				),
+			)
+
 			logger.Info("event received",
 				"event_id", eventID,
 				"key", string(record.Key),
@@ -91,6 +119,8 @@ func main() {
 				"offset", record.Offset,
 				"payload", string(record.Value),
 			)
+
+			span.End()
 		})
 
 		if err := client.CommitUncommittedOffsets(ctx); err != nil {

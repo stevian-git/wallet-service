@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +52,14 @@ func TestHTTPAPIEndToEnd(t *testing.T) {
 	ready := client.request(http.MethodGet, "/readyz", nil, "", false)
 	if ready.Code != http.StatusOK {
 		t.Fatalf("readyz status = %d", ready.Code)
+	}
+
+	metrics := client.request(http.MethodGet, "/metrics", nil, "", false)
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d", metrics.Code)
+	}
+	if body := metrics.Body.String(); !strings.Contains(body, "wallet_http_requests_total") {
+		t.Fatalf("metrics body missing wallet_http_requests_total: %s", body[:min(len(body), 200)])
 	}
 
 	unauthorized := client.request(http.MethodGet, "/v1/accounts/"+uuid.NewString(), nil, "", false)

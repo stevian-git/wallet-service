@@ -28,8 +28,10 @@ func (s *Service) Topup(ctx context.Context, meta Meta, req TopupRequest) (Resul
 			Metadata:             metadata,
 		})
 		if err != nil {
+			recordTransferOutcome(string(ledger.TransferTypeTopup), err)
 			return idempotency.Response{}, err
 		}
+		recordTransferOutcome(string(ledger.TransferTypeTopup), nil)
 		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }
@@ -59,8 +61,10 @@ func (s *Service) Transfer(ctx context.Context, meta Meta, req TransferRequest) 
 			Metadata:             metadata,
 		})
 		if err != nil {
+			recordTransferOutcome(string(ledger.TransferTypeTransfer), err)
 			return idempotency.Response{}, err
 		}
+		recordTransferOutcome(string(ledger.TransferTypeTransfer), nil)
 		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }
@@ -83,8 +87,10 @@ func (s *Service) Withdrawal(ctx context.Context, meta Meta, req WithdrawalReque
 			Metadata:        metadata,
 		})
 		if err != nil {
+			recordTransferOutcome(string(ledger.TransferTypeWithdrawal), err)
 			return idempotency.Response{}, err
 		}
+		recordTransferOutcome(string(ledger.TransferTypeWithdrawal), nil)
 		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }
@@ -97,8 +103,10 @@ func (s *Service) ReverseTransfer(ctx context.Context, meta Meta, transferID uui
 	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
 		transfer, err := s.book.Reverse(ctx, tx, transferID, req.Reason)
 		if err != nil {
+			recordTransferOutcome(string(ledger.TransferTypeReversal), err)
 			return idempotency.Response{}, err
 		}
+		recordTransferOutcome(string(ledger.TransferTypeReversal), nil)
 		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }

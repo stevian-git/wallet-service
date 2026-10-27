@@ -59,8 +59,10 @@ func (s *Service) CaptureHold(ctx context.Context, meta Meta, holdID uuid.UUID, 
 			Amount:               req.Amount,
 		})
 		if err != nil {
+			recordTransferOutcome(string(ledger.TransferTypeHoldCapture), err)
 			return idempotency.Response{}, err
 		}
+		recordTransferOutcome(string(ledger.TransferTypeHoldCapture), nil)
 		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }

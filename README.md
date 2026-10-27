@@ -30,9 +30,15 @@ posting path.
   with crash-safe retry.
 - `GET /v1/admin/integrity` backed by the schema's read-only integrity views.
 - Append-only enforcement through database privileges and a startup role check.
+- OpenTelemetry traces (HTTP → DB → outbox → Kafka → consumer) and Prometheus
+  metrics (request latency, transfer outcome, outbox lag, idempotency replays,
+  lock wait time). Jaeger, Prometheus, and Grafana wired into docker-compose.
+- k6 load tests (mixed transfers and hot-wallet scenario) with k6 summary export.
+- Chaos script (`scripts/chaos.sh`) that injects Postgres connection kills,
+  Kafka 30s outage, and relay restarts during load, then asserts integrity and
+  published-vs-posted event counts.
 - Integration tests against real PostgreSQL and Redpanda via testcontainers.
 
-Not yet implemented: metrics and distributed tracing.
 The HTTP contract for holds and reconciliation is documented in
 `docs/openapi.yaml`.
 
@@ -43,7 +49,7 @@ Requirements: Go 1.25+, Docker.
 ```bash
 cp .env.example .env
 
-make up          # PostgreSQL 16 on :5436 and Redpanda on :9092
+make up          # PostgreSQL 16 on :5436, Redpanda on :9092, plus Jaeger/Prometheus/Grafana
 make migrate     # run migrations as ledger_migrator
 make kafka-topic # optional: create ledger.events.v1 with 3 partitions
 make run         # start the API with the ledger_app role
@@ -149,6 +155,69 @@ Generate a mock settlement CSV from existing transfers:
 make mock-settlement MOCK_OUTPUT=settlement.csv MOCK_DATE=2026-10-26
 ```
 
+## Observability
+
+`make up` starts the observability stack alongside Postgres and Redpanda:
+
+| Service | URL |
+| --- | --- |
+| Jaeger UI | http://localhost:16686 |
+| Prometheus | http://localhost:9090 |
+| Grafana (anonymous admin) | http://localhost:3000 |
+
+The API exposes Prometheus metrics at `/metrics` (no auth required). The
+Grafana dashboard (provisioned) includes: HTTP request rate and p50/p95/p99
+latency, transfer rate by type and outcome, outbox lag gauge, idempotency
+replay rate, and lock wait duration (p95).
+
+Traces propagate end-to-end via the `traceparent` header:
+
+- HTTP → DB spans (pgx tracer) → outbox row headers → relay produces
+  `kafka.publish` spans (parented from the stored traceparent) → Kafka record
+  headers → consumer `kafka.consume` spans.
+
+Environment:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`)
+- `OTEL_SERVICE_NAME` (per-binary defaults)
+- `OTEL_SDK_DISABLED=true` disables tracing entirely
+
+## Load tests
+
+Requires [k6](https://k6.io/) installed on `PATH`.
+
+```bash
+make loadtest          # mixed transfers among 20 wallets
+make loadtest-hot      # 80% of transfers target one wallet (lock contention)
+```
+
+Variables: `VUS` (default 10), `DURATION` (default 30s), `BASE_URL`, `API_KEY`.
+
+Summaries are written to `results/summary.json` and `results/`. See
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology and placeholders
+for actual numbers.
+
+## Chaos testing
+
+```bash
+make chaos
+```
+
+`scripts/chaos.sh` orchestrates:
+
+1. Start outbox relay and k6 load (managed processes).
+2. Terminate Postgres backends (except chaos script's own PID).
+3. Stop Kafka for 30s.
+4. Kill the relay and restart after 10s.
+5. Wait for the k6 load to finish.
+6. Wait for outbox drain (no unpublished events).
+7. Assert `/v1/admin/integrity` returns `ok: true`.
+8. Assert posted transfer count equals published `transfer.posted` event count
+   (single-statement snapshot).
+
+Results (logs, integrity snapshot, consistency counts) are written to
+`results/chaos-<timestamp>/`.
+
 ## Tests
 
 ```bash
@@ -200,9 +269,13 @@ internal/reconciliation settlement import, reconciliation logic, service
 internal/app         application orchestration and response views
 internal/httpapi     routing, middleware, problem+json responses
 internal/problem     domain error -> RFC 7807 mapping
-internal/platform    config, database, logging
+internal/platform    config, database, logging, telemetry
 migrations/          golang-migrate migrations (schema copied verbatim)
 deploy/postgres/init role provisioning
+deploy/prometheus    Prometheus scrape config
+deploy/grafana       provisioned datasource and dashboard JSON
+deploy/k6            k6 load test scripts
+scripts/             chaos test orchestration
 docs/                schema, OpenAPI contract, ADRs
 ```
 
@@ -226,6 +299,10 @@ docs/                schema, OpenAPI contract, ADRs
 - Settlement files are deduplicated by SHA-256 hash. Reconciliation runs compare
   settlement records against ledger transfers in scope (by date and reference).
   See `docs/adr/0006-reconciliation-run-semantics.md`.
+- Observability is wired through OpenTelemetry (traces, OTLP gRPC to Jaeger)
+  and Prometheus (metrics on `/metrics`). Outbox lag is computed at scrape time
+  from the DB so it works even when the relay is down. See
+  `docs/adr/0007-observability-and-evidence.md`.
 - Database triggers and stored procedures are intentionally not used. See
   `docs/adr/0001-no-triggers-stored-procedures.md`.
 

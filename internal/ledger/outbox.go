@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 func insertOutboxEvent(ctx context.Context, tx pgx.Tx, aggregateType string, aggregateID uuid.UUID, eventType string, payload any) error {
@@ -17,6 +18,16 @@ func insertOutboxEvent(ctx context.Context, tx pgx.Tx, aggregateType string, agg
 		"event_id":       uuid.NewString(),
 		"schema_version": "1",
 	})
+	if err != nil {
+		return err
+	}
+
+	headers := map[string]string{
+		"event_id":       uuid.NewString(),
+		"schema_version": "1",
+	}
+	telemetry.InjectTrace(ctx, headers)
+	headersJSON, err = json.Marshal(headers)
 	if err != nil {
 		return err
 	}

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
@@ -20,6 +22,7 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	config.MaxConnIdleTime = 30 * time.Minute
 	config.HealthCheckPeriod = 30 * time.Second
 	config.ConnConfig.RuntimeParams["application_name"] = "wallet-api"
+	config.ConnConfig.Tracer = telemetry.NewPGXTracer()
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
