@@ -17,6 +17,7 @@ import (
 	"github.com/stevians/wallet-service/internal/app"
 	"github.com/stevians/wallet-service/internal/idempotency"
 	"github.com/stevians/wallet-service/internal/ledger"
+	"github.com/stevians/wallet-service/internal/reconciliation"
 	"github.com/stevians/wallet-service/internal/testutil"
 )
 
@@ -39,7 +40,7 @@ type problemResponse struct {
 func TestHTTPAPIEndToEnd(t *testing.T) {
 	pg := testutil.NewPostgres(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second))
+	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second), reconciliation.NewService(pg.Pool))
 	server := New(service, logger, testAPIKey, pg.Pool.Ping)
 	client := &apiClient{t: t, handler: server.Handler()}
 

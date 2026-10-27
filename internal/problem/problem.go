@@ -37,6 +37,15 @@ func From(err error) *Error {
 		return problemErr
 	}
 
+	type statusCoder interface {
+		Error() string
+		StatusCode() int
+	}
+	var sc statusCoder
+	if errors.As(err, &sc) {
+		return &Error{Status: sc.StatusCode(), Code: "duplicate_file", Title: "Duplicate file", Detail: err.Error()}
+	}
+
 	switch {
 	case errors.Is(err, ledger.ErrNotFound):
 		return &Error{Status: http.StatusNotFound, Code: "not_found", Title: "Not found"}
@@ -59,6 +68,9 @@ func From(err error) *Error {
 		errors.Is(err, ledger.ErrUnbalancedEntries):
 		return &Error{Status: http.StatusUnprocessableEntity, Code: "validation_failed", Title: "Validation failed", Detail: err.Error()}
 	default:
+		if err.Error() == "reconciliation run not found" || err.Error() == "settlement file not found" {
+			return &Error{Status: http.StatusNotFound, Code: "not_found", Title: "Not found", Detail: err.Error()}
+		}
 		return &Error{Status: http.StatusInternalServerError, Title: "Internal server error"}
 	}
 }

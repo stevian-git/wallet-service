@@ -180,6 +180,35 @@ func LoadConsumer() (ConsumerConfig, error) {
 	return ConsumerConfig{LogLevel: level, Brokers: brokers, Topic: topic, Group: group}, nil
 }
 
+type ReconcilerConfig struct {
+	DatabaseURL  string
+	LogLevel     slog.Level
+	PollInterval time.Duration
+}
+
+func LoadReconciler() (ReconcilerConfig, error) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		return ReconcilerConfig{}, fmt.Errorf("DATABASE_URL is required and must use the ledger_app role")
+	}
+	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	if err != nil {
+		return ReconcilerConfig{}, err
+	}
+	pollInterval := 5 * time.Second
+	if raw := os.Getenv("RECONCILER_POLL_INTERVAL"); raw != "" {
+		pollInterval, err = time.ParseDuration(raw)
+		if err != nil || pollInterval <= 0 {
+			return ReconcilerConfig{}, fmt.Errorf("RECONCILER_POLL_INTERVAL must be a positive duration")
+		}
+	}
+	return ReconcilerConfig{
+		DatabaseURL:  databaseURL,
+		LogLevel:     level,
+		PollInterval: pollInterval,
+	}, nil
+}
+
 func kafkaBrokers() ([]string, error) {
 	raw := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
 	if raw == "" {

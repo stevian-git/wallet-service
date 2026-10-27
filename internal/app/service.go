@@ -9,15 +9,17 @@ import (
 	"github.com/stevians/wallet-service/internal/idempotency"
 	"github.com/stevians/wallet-service/internal/ledger"
 	"github.com/stevians/wallet-service/internal/problem"
+	"github.com/stevians/wallet-service/internal/reconciliation"
 )
 
 type Service struct {
-	book *ledger.Ledger
-	idem *idempotency.Service
+	book  *ledger.Ledger
+	idem  *idempotency.Service
+	recon *reconciliation.Service
 }
 
-func New(book *ledger.Ledger, idem *idempotency.Service) *Service {
-	return &Service{book: book, idem: idem}
+func New(book *ledger.Ledger, idem *idempotency.Service, recon *reconciliation.Service) *Service {
+	return &Service{book: book, idem: idem, recon: recon}
 }
 
 type Meta struct {

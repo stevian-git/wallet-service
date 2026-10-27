@@ -238,3 +238,41 @@ func holdView(hold ledger.Hold) HoldView {
 		ResolvedAt: hold.ResolvedAt,
 	}
 }
+
+type SettlementFileView struct {
+	ID             uuid.UUID `json:"id"`
+	Provider       string    `json:"provider"`
+	FileName       string    `json:"file_name"`
+	SettlementDate string    `json:"settlement_date"`
+	RecordCount    int       `json:"record_count"`
+	ImportedAt     time.Time `json:"imported_at"`
+}
+
+type ReconciliationRunView struct {
+	ID               uuid.UUID  `json:"id"`
+	FileID           uuid.UUID  `json:"file_id"`
+	Status           string     `json:"status"`
+	StartedAt        time.Time  `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at"`
+	MatchedCount     int        `json:"matched_count"`
+	DiscrepancyCount int        `json:"discrepancy_count"`
+	Error            *string    `json:"error"`
+}
+
+type DiscrepancyView struct {
+	ID                 int64      `json:"id"`
+	RunID              uuid.UUID  `json:"run_id"`
+	Kind               string     `json:"kind"`
+	TransferID         *uuid.UUID `json:"transfer_id"`
+	SettlementRecordID *int64     `json:"settlement_record_id"`
+	ExpectedAmount     *int64     `json:"expected_amount"`
+	ActualAmount       *int64     `json:"actual_amount"`
+	Resolution         string     `json:"resolution"`
+	Note               *string    `json:"note"`
+	CreatedAt          time.Time  `json:"created_at"`
+}
+
+type DiscrepanciesPageView struct {
+	Data       []DiscrepancyView `json:"data"`
+	NextCursor *string           `json:"next_cursor"`
+}

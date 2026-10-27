@@ -84,3 +84,13 @@ type CaptureHoldRequest struct {
 	DestinationAccountID uuid.UUID `json:"destination_account_id"`
 	Amount               int64     `json:"amount"`
 }
+
+type CreateReconciliationRunRequest struct {
+	FileID uuid.UUID `json:"file_id"`
+}
+
+type ListDiscrepanciesRequest struct {
+	Resolution *string
+	Cursor     string
+	Limit      int
+}

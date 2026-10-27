@@ -25,11 +25,14 @@ posting path.
   retry state, and `FOR UPDATE SKIP LOCKED` claiming for multiple instances.
 - Demo Kafka consumer (`cmd/consumer-demo`) with `event_id` dedupe.
 - Hold expiry worker (`cmd/holdsweeper`) safe to run as multiple instances.
+- Reconciliation: import settlement CSV files, create reconciliation runs, and
+  query discrepancies. Worker (`cmd/reconciler`) claims and processes runs
+  with crash-safe retry.
 - `GET /v1/admin/integrity` backed by the schema's read-only integrity views.
 - Append-only enforcement through database privileges and a startup role check.
 - Integration tests against real PostgreSQL and Redpanda via testcontainers.
 
-Not yet implemented: reconciliation/import, metrics, and distributed tracing.
+Not yet implemented: metrics and distributed tracing.
 The HTTP contract for holds and reconciliation is documented in
 `docs/openapi.yaml`.
 
@@ -55,6 +58,7 @@ Run the background processes in separate terminals:
 make holdsweeper   # expire due holds every 5s
 make relay         # publish outbox rows to Kafka
 make consumer-demo # print and dedupe events
+make reconciler    # process reconciliation runs
 ```
 
 ```bash
@@ -110,6 +114,41 @@ curl -s -X POST http://localhost:8080/v1/holds/HOLD_ID/release \
 Retrying the same request with the same `Idempotency-Key` and body returns the
 original response and sets `Idempotent-Replayed: true`.
 
+## Reconciliation
+
+Import a settlement CSV file (columns: `provider_ref,our_reference,amount,currency,status,occurred_at`):
+
+```bash
+curl -s -X POST http://localhost:8080/v1/reconciliation/settlement-files \
+  -H 'X-API-Key: dev_api_key' \
+  -F 'provider=mock_bank_a' \
+  -F 'settlement_date=2026-10-26' \
+  -F 'file=@settlement.csv'
+```
+
+Create a reconciliation run:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/reconciliation/runs \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev_api_key' \
+  -d '{"file_id":"FILE_ID"}'
+```
+
+The reconciler worker (`make reconciler`) polls for `running` runs, claims them,
+and processes them. Query discrepancies:
+
+```bash
+curl -s http://localhost:8080/v1/reconciliation/runs/RUN_ID/discrepancies \
+  -H 'X-API-Key: dev_api_key'
+```
+
+Generate a mock settlement CSV from existing transfers:
+
+```bash
+make mock-settlement MOCK_OUTPUT=settlement.csv MOCK_DATE=2026-10-26
+```
+
 ## Tests
 
 ```bash
@@ -151,10 +190,13 @@ cmd/migrate          migration CLI
 cmd/holdsweeper      hold expiry worker
 cmd/relay            outbox -> Kafka relay
 cmd/consumer-demo    demo Kafka consumer with event_id dedupe
+cmd/reconciler       reconciliation worker
+cmd/mock-settlement  mock settlement CSV generator
 internal/ledger      posting, balances, holds, reversal, integrity views
 internal/idempotency idempotency reservation/replay service
 internal/outbox      outbox claiming, relay, Kafka publisher
 internal/consumer    demo consumer dedupe
+internal/reconciliation settlement import, reconciliation logic, service
 internal/app         application orchestration and response views
 internal/httpapi     routing, middleware, problem+json responses
 internal/problem     domain error -> RFC 7807 mapping
@@ -181,6 +223,9 @@ docs/                schema, OpenAPI contract, ADRs
 - Outbox rows are written in the ledger transaction and published later by the
   relay. Delivery is at-least-once; consumers must dedupe by `event_id`. See
   `docs/adr/0004-outbox-vs-dual-write.md`.
+- Settlement files are deduplicated by SHA-256 hash. Reconciliation runs compare
+  settlement records against ledger transfers in scope (by date and reference).
+  See `docs/adr/0006-reconciliation-run-semantics.md`.
 - Database triggers and stored procedures are intentionally not used. See
   `docs/adr/0001-no-triggers-stored-procedures.md`.
 

@@ -17,6 +17,7 @@ import (
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/db"
 	"github.com/stevians/wallet-service/internal/platform/log"
+	"github.com/stevians/wallet-service/internal/reconciliation"
 )
 
 func main() {
@@ -46,7 +47,8 @@ func main() {
 
 	book := ledger.New(pool)
 	idempotencyService := idempotency.New(pool, cfg.IdempotencyLease)
-	service := app.New(book, idempotencyService)
+	reconService := reconciliation.NewService(pool)
+	service := app.New(book, idempotencyService, reconService)
 	handler := httpapi.New(service, logger, cfg.APIKey, pool.Ping)
 
 	server := &http.Server{

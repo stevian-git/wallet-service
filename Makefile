@@ -17,8 +17,9 @@ HOLD_SWEEP_BATCH_SIZE ?= 100
 OUTBOX_BATCH_SIZE ?= 50
 OUTBOX_POLL_INTERVAL ?= 1s
 OUTBOX_MAX_BACKOFF ?= 30s
+RECONCILER_POLL_INTERVAL ?= 5s
 
-.PHONY: up up-db up-kafka down reset migrate migrate-down migrate-version test run relay consumer-demo holdsweeper kafka-topic build fmt vet
+.PHONY: up up-db up-kafka down reset migrate migrate-down migrate-version test run relay consumer-demo holdsweeper reconciler mock-settlement kafka-topic build fmt vet
 
 up: up-db up-kafka
 
@@ -62,6 +63,13 @@ holdsweeper: up-db
 	DATABASE_URL='$(DATABASE_URL)' HOLD_SWEEP_INTERVAL='$(HOLD_SWEEP_INTERVAL)' HOLD_SWEEP_BATCH_SIZE='$(HOLD_SWEEP_BATCH_SIZE)' \
 	go run ./cmd/holdsweeper
 
+reconciler: up-db
+	DATABASE_URL='$(DATABASE_URL)' RECONCILER_POLL_INTERVAL='$(RECONCILER_POLL_INTERVAL)' \
+	go run ./cmd/reconciler
+
+mock-settlement: up-db
+	DATABASE_URL='$(DATABASE_URL)' API_KEY='$(API_KEY)' go run ./cmd/mock-settlement $(MOCK_OUTPUT) $(MOCK_DATE)
+
 kafka-topic: up-kafka
 	docker compose exec redpanda rpk topic create '$(KAFKA_TOPIC)' -p 3 -r 1 || true
 
@@ -71,6 +79,8 @@ build:
 	go build -o bin/relay ./cmd/relay
 	go build -o bin/consumer-demo ./cmd/consumer-demo
 	go build -o bin/holdsweeper ./cmd/holdsweeper
+	go build -o bin/reconciler ./cmd/reconciler
+	go build -o bin/mock-settlement ./cmd/mock-settlement
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')

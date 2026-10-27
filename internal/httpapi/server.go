@@ -49,6 +49,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/holds/{holdId}/capture", s.handleCaptureHold)
 	mux.HandleFunc("POST /v1/holds/{holdId}/release", s.handleReleaseHold)
 	mux.HandleFunc("GET /v1/admin/integrity", s.handleIntegrity)
+	mux.HandleFunc("POST /v1/reconciliation/settlement-files", s.handleImportSettlementFile)
+	mux.HandleFunc("POST /v1/reconciliation/runs", s.handleCreateReconciliationRun)
+	mux.HandleFunc("GET /v1/reconciliation/runs/{runId}", s.handleGetReconciliationRun)
+	mux.HandleFunc("GET /v1/reconciliation/runs/{runId}/discrepancies", s.handleListDiscrepancies)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("/", s.handleNotFound)
@@ -154,6 +158,11 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 
 func (s *Server) withBodyLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/reconciliation/settlement-files" {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		}
