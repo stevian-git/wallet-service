@@ -123,3 +123,47 @@ func (s *Server) handleListDiscrepancies(w http.ResponseWriter, r *http.Request)
 
 	s.writeJSON(w, http.StatusOK, page)
 }
+
+func (s *Server) handleListReconciliationRuns(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 200 {
+			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
+			return
+		}
+		limit = parsed
+	}
+
+	cursor := r.URL.Query().Get("cursor")
+
+	page, err := s.app.ListReconciliationRuns(r.Context(), cursor, limit)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, page)
+}
+
+func (s *Server) handleListSettlementFiles(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 200 {
+			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
+			return
+		}
+		limit = parsed
+	}
+
+	cursor := r.URL.Query().Get("cursor")
+
+	page, err := s.app.ListSettlementFiles(r.Context(), cursor, limit)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, page)
+}

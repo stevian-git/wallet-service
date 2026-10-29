@@ -40,12 +40,14 @@ func New(service *app.Service, logger *slog.Logger, apiKey string, ready func(co
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/accounts", s.handleCreateAccount)
+	mux.HandleFunc("GET /v1/accounts", s.handleListAccounts)
 	mux.HandleFunc("GET /v1/accounts/{accountId}", s.handleGetAccount)
 	mux.HandleFunc("GET /v1/accounts/{accountId}/balance", s.handleGetBalance)
 	mux.HandleFunc("GET /v1/accounts/{accountId}/entries", s.handleListEntries)
 	mux.HandleFunc("POST /v1/topups", s.handleTopup)
 	mux.HandleFunc("POST /v1/transfers", s.handleTransfer)
 	mux.HandleFunc("POST /v1/withdrawals", s.handleWithdrawal)
+	mux.HandleFunc("GET /v1/transfers", s.handleListTransfers)
 	mux.HandleFunc("GET /v1/transfers/{transferId}", s.handleGetTransfer)
 	mux.HandleFunc("POST /v1/transfers/{transferId}/reversal", s.handleReverseTransfer)
 	mux.HandleFunc("POST /v1/holds", s.handleCreateHold)
@@ -54,7 +56,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/holds/{holdId}/release", s.handleReleaseHold)
 	mux.HandleFunc("GET /v1/admin/integrity", s.handleIntegrity)
 	mux.HandleFunc("POST /v1/reconciliation/settlement-files", s.handleImportSettlementFile)
+	mux.HandleFunc("GET /v1/reconciliation/settlement-files", s.handleListSettlementFiles)
 	mux.HandleFunc("POST /v1/reconciliation/runs", s.handleCreateReconciliationRun)
+	mux.HandleFunc("GET /v1/reconciliation/runs", s.handleListReconciliationRuns)
 	mux.HandleFunc("GET /v1/reconciliation/runs/{runId}", s.handleGetReconciliationRun)
 	mux.HandleFunc("GET /v1/reconciliation/runs/{runId}/discrepancies", s.handleListDiscrepancies)
 	mux.Handle("GET /metrics", promhttp.Handler())
@@ -62,7 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("/", s.handleNotFound)
 
-	return s.withRequestID(s.withRecover(s.withTracing(s.withMetrics(s.withLogging(s.withAuth(s.withBodyLimit(mux)))))))
+	return s.withRequestID(s.withRecover(s.withTracing(s.withMetrics(s.withLogging(s.withCORS(s.withAuth(s.withBodyLimit(mux))))))))
 }
 
 type requestIDContextKey struct{}
@@ -204,6 +208,26 @@ func (s *Server) withBodyLimit(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Request-ID")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+		}
+		
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -243,6 +267,26 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeResult(w, result)
+}
+
+func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 200 {
+			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
+			return
+		}
+		limit = parsed
+	}
+
+	cursor := r.URL.Query().Get("cursor")
+	page, err := s.app.ListAccounts(r.Context(), cursor, limit)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
@@ -352,6 +396,26 @@ func (s *Server) handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleListTransfers(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 200 {
+			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
+			return
+		}
+		limit = parsed
+	}
+
+	cursor := r.URL.Query().Get("cursor")
+	page, err := s.app.ListTransfers(r.Context(), cursor, limit)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) handleReverseTransfer(w http.ResponseWriter, r *http.Request) {

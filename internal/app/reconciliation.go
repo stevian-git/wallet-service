@@ -65,6 +65,66 @@ func (s *Service) GetReconciliationRun(ctx context.Context, runID uuid.UUID) (Re
 	return reconciliationRunView(run), nil
 }
 
+func (s *Service) ListReconciliationRuns(ctx context.Context, cursor string, limit int) (ReconciliationRunsPageView, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	page, err := s.recon.ListRuns(ctx, reconciliation.ListRunsInput{
+		Cursor: cursor,
+		Limit:  limit,
+	})
+	if err != nil {
+		return ReconciliationRunsPageView{}, err
+	}
+
+	views := make([]ReconciliationRunView, 0, len(page.Data))
+	for _, run := range page.Data {
+		views = append(views, reconciliationRunView(run))
+	}
+	if views == nil {
+		views = []ReconciliationRunView{}
+	}
+
+	return ReconciliationRunsPageView{
+		Data:       views,
+		NextCursor: page.NextCursor,
+	}, nil
+}
+
+func (s *Service) ListSettlementFiles(ctx context.Context, cursor string, limit int) (SettlementFilesPageView, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	page, err := s.recon.ListSettlementFiles(ctx, reconciliation.ListSettlementFilesInput{
+		Cursor: cursor,
+		Limit:  limit,
+	})
+	if err != nil {
+		return SettlementFilesPageView{}, err
+	}
+
+	views := make([]SettlementFileView, 0, len(page.Data))
+	for _, file := range page.Data {
+		views = append(views, settlementFileView(file))
+	}
+	if views == nil {
+		views = []SettlementFileView{}
+	}
+
+	return SettlementFilesPageView{
+		Data:       views,
+		NextCursor: page.NextCursor,
+	}, nil
+}
+
 func (s *Service) ListDiscrepancies(ctx context.Context, runID uuid.UUID, resolution *string, cursor string, limit int) (DiscrepanciesPageView, error) {
 	if limit <= 0 {
 		limit = 50
@@ -122,6 +182,17 @@ func discrepancyView(d reconciliation.Discrepancy) DiscrepancyView {
 		Resolution:         d.Resolution,
 		Note:               d.Note,
 		CreatedAt:          d.CreatedAt,
+	}
+}
+
+func settlementFileView(f reconciliation.SettlementFile) SettlementFileView {
+	return SettlementFileView{
+		ID:             f.ID,
+		Provider:       f.Provider,
+		FileName:       f.FileName,
+		SettlementDate: f.SettlementDate.Format("2006-01-02"),
+		RecordCount:    f.RecordCount,
+		ImportedAt:     f.ImportedAt,
 	}
 }
 

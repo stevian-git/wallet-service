@@ -36,6 +36,38 @@ func (s *Service) GetAccount(ctx context.Context, accountID uuid.UUID) (AccountV
 	return accountView(account), nil
 }
 
+func (s *Service) ListAccounts(ctx context.Context, cursor string, limit int) (AccountsPage, error) {
+	var afterID *uuid.UUID
+	if cursor != "" {
+		id, err := uuid.Parse(cursor)
+		if err != nil {
+			return AccountsPage{}, err
+		}
+		afterID = &id
+	}
+
+	accounts, nextCursor, err := s.book.ListAccounts(ctx, afterID, limit)
+	if err != nil {
+		return AccountsPage{}, err
+	}
+
+	data := make([]AccountView, 0, len(accounts))
+	for _, acc := range accounts {
+		data = append(data, accountView(acc))
+	}
+
+	var nextCursorStr *string
+	if nextCursor != nil {
+		s := nextCursor.String()
+		nextCursorStr = &s
+	}
+
+	return AccountsPage{
+		Data:       data,
+		NextCursor: nextCursorStr,
+	}, nil
+}
+
 func (s *Service) GetBalance(ctx context.Context, accountID uuid.UUID) (BalanceView, error) {
 	balance, err := s.book.GetBalance(ctx, accountID)
 	if err != nil {

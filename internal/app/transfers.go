@@ -118,3 +118,35 @@ func (s *Service) GetTransfer(ctx context.Context, transferID uuid.UUID) (Transf
 	}
 	return transferDetailView(detail), nil
 }
+
+func (s *Service) ListTransfers(ctx context.Context, cursor string, limit int) (TransfersPage, error) {
+	var afterID *uuid.UUID
+	if cursor != "" {
+		id, err := uuid.Parse(cursor)
+		if err != nil {
+			return TransfersPage{}, err
+		}
+		afterID = &id
+	}
+
+	transfers, nextCursor, err := s.book.ListTransfers(ctx, afterID, limit)
+	if err != nil {
+		return TransfersPage{}, err
+	}
+
+	data := make([]TransferView, 0, len(transfers))
+	for _, t := range transfers {
+		data = append(data, transferView(t))
+	}
+
+	var nextCursorStr *string
+	if nextCursor != nil {
+		s := nextCursor.String()
+		nextCursorStr = &s
+	}
+
+	return TransfersPage{
+		Data:       data,
+		NextCursor: nextCursorStr,
+	}, nil
+}

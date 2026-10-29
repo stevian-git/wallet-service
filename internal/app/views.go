@@ -44,6 +44,11 @@ type EntriesPage struct {
 	NextCursor *string     `json:"next_cursor"`
 }
 
+type AccountsPage struct {
+	Data       []AccountView `json:"data"`
+	NextCursor *string       `json:"next_cursor"`
+}
+
 type TransferView struct {
 	ID                   uuid.UUID             `json:"id"`
 	Type                 ledger.TransferType   `json:"type"`
@@ -62,6 +67,11 @@ type TransferView struct {
 type TransferDetailView struct {
 	TransferView
 	Entries []EntryView `json:"entries"`
+}
+
+type TransfersPage struct {
+	Data       []TransferView `json:"data"`
+	NextCursor *string        `json:"next_cursor"`
 }
 
 type BalanceDriftView struct {
@@ -248,6 +258,11 @@ type SettlementFileView struct {
 	ImportedAt     time.Time `json:"imported_at"`
 }
 
+type SettlementFilesPageView struct {
+	Data       []SettlementFileView `json:"data"`
+	NextCursor *string              `json:"next_cursor"`
+}
+
 type ReconciliationRunView struct {
 	ID               uuid.UUID  `json:"id"`
 	FileID           uuid.UUID  `json:"file_id"`
@@ -257,6 +272,11 @@ type ReconciliationRunView struct {
 	MatchedCount     int        `json:"matched_count"`
 	DiscrepancyCount int        `json:"discrepancy_count"`
 	Error            *string    `json:"error"`
+}
+
+type ReconciliationRunsPageView struct {
+	Data       []ReconciliationRunView `json:"data"`
+	NextCursor *string                 `json:"next_cursor"`
 }
 
 type DiscrepancyView struct {

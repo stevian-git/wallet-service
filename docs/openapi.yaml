@@ -27,6 +27,34 @@ security:
 
 paths:
   /v1/accounts:
+    get:
+      tags: [Accounts]
+      summary: Daftar akun, terbaru lebih dulu
+      operationId: listAccounts
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Cursor opaque dari respons sebelumnya
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Account'
+                  next_cursor:
+                    type: string
+                    nullable: true
     post:
       tags: [Accounts]
       summary: Buat akun wallet
@@ -149,6 +177,34 @@ paths:
           $ref: '#/components/responses/Unprocessable'
 
   /v1/transfers:
+    get:
+      tags: [Transfers]
+      summary: Daftar transfer, terbaru lebih dulu
+      operationId: listTransfers
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Cursor opaque dari respons sebelumnya
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transfer'
+                  next_cursor:
+                    type: string
+                    nullable: true
     post:
       tags: [Transfers]
       summary: Transfer antar wallet
@@ -360,6 +416,34 @@ paths:
           $ref: '#/components/responses/Conflict'
 
   /v1/reconciliation/settlement-files:
+    get:
+      tags: [Reconciliation]
+      summary: Daftar file settlement, terbaru lebih dulu
+      operationId: listSettlementFiles
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Cursor opaque dari respons sebelumnya
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SettlementFile'
+                  next_cursor:
+                    type: string
+                    nullable: true
     post:
       tags: [Reconciliation]
       summary: Impor file settlement dari provider (CSV)
@@ -399,6 +483,34 @@ paths:
           $ref: '#/components/responses/Unprocessable'
 
   /v1/reconciliation/runs:
+    get:
+      tags: [Reconciliation]
+      summary: Daftar reconciliation run, terbaru lebih dulu
+      operationId: listReconciliationRuns
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Cursor opaque dari respons sebelumnya
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReconciliationRun'
+                  next_cursor:
+                    type: string
+                    nullable: true
     post:
       tags: [Reconciliation]
       summary: Jalankan rekonsiliasi untuk satu file settlement

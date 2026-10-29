@@ -104,3 +104,12 @@ fmt:
 
 vet:
 	go vet ./...
+
+dashboard-dev:
+	cd dashboard && npm run dev
+
+dashboard-build:
+	cd dashboard && npm run build
+
+dashboard-screenshots:
+	cd dashboard && OUTPUT_DIR=../docs/screenshots API_KEY=$(API_KEY) npm run screenshots

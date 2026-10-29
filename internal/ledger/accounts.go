@@ -108,6 +108,69 @@ func (l *Ledger) GetAccount(ctx context.Context, accountID uuid.UUID) (Account, 
 	}, nil
 }
 
+func (l *Ledger) ListAccounts(ctx context.Context, afterID *uuid.UUID, limit int) ([]Account, *uuid.UUID, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	var cursor pgtype.UUID
+	if afterID != nil {
+		cursor = toPgUUID(*afterID)
+	}
+
+	rows, err := l.pool.Query(ctx, `
+		SELECT id, kind::text, owner_ref, currency, normal_side::text, allow_negative, status, created_at
+		  FROM accounts
+		 WHERE ($1::uuid = '00000000-0000-0000-0000-000000000000' OR id < $1)
+		 ORDER BY id DESC
+		 LIMIT $2`, cursor, limit+1)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	accounts := make([]Account, 0, limit+1)
+	for rows.Next() {
+		var (
+			id            pgtype.UUID
+			kind          string
+			ownerRef      pgtype.Text
+			currency      string
+			normalSide    string
+			allowNegative bool
+			status        string
+			createdAt     time.Time
+		)
+		if err := rows.Scan(&id, &kind, &ownerRef, &currency, &normalSide, &allowNegative, &status, &createdAt); err != nil {
+			return nil, nil, err
+		}
+		accounts = append(accounts, Account{
+			ID:            uuidFromPg(id),
+			Kind:          AccountKind(kind),
+			OwnerRef:      textPtrFromPg(ownerRef),
+			Currency:      currency,
+			NormalSide:    NormalSide(normalSide),
+			AllowNegative: allowNegative,
+			Status:        status,
+			CreatedAt:     createdAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	var nextCursor *uuid.UUID
+	if len(accounts) > limit {
+		accounts = accounts[:limit]
+		value := accounts[len(accounts)-1].ID
+		nextCursor = &value
+	}
+	return accounts, nextCursor, nil
+}
+
 func (l *Ledger) GetBalance(ctx context.Context, accountID uuid.UUID) (Balance, error) {
 	var (
 		id        pgtype.UUID
@@ -314,6 +377,88 @@ func (l *Ledger) listTransferEntries(ctx context.Context, transferID uuid.UUID) 
 		return nil, err
 	}
 	return entries, nil
+}
+
+func (l *Ledger) ListTransfers(ctx context.Context, afterID *uuid.UUID, limit int) ([]Transfer, *uuid.UUID, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	var cursor pgtype.UUID
+	if afterID != nil {
+		cursor = toPgUUID(*afterID)
+	}
+
+	rows, err := l.pool.Query(ctx, `
+		SELECT id, type::text, status::text, amount, currency,
+		       source_account_id, destination_account_id, reference,
+		       reverses_transfer_id, metadata, created_at, posted_at
+		  FROM transfers
+		 WHERE ($1::uuid = '00000000-0000-0000-0000-000000000000' OR id < $1)
+		 ORDER BY id DESC
+		 LIMIT $2`, cursor, limit+1)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	transfers := make([]Transfer, 0, limit+1)
+	for rows.Next() {
+		var (
+			id                   pgtype.UUID
+			transferType         string
+			status               string
+			amount               int64
+			currency             string
+			sourceAccountID      pgtype.UUID
+			destinationAccountID pgtype.UUID
+			reference            pgtype.Text
+			reversesTransferID   pgtype.UUID
+			metadata             []byte
+			createdAt            time.Time
+			postedAt             pgtype.Timestamptz
+		)
+		if err := rows.Scan(
+			&id, &transferType, &status, &amount, &currency,
+			&sourceAccountID, &destinationAccountID, &reference,
+			&reversesTransferID, &metadata, &createdAt, &postedAt,
+		); err != nil {
+			return nil, nil, err
+		}
+		var postedAtPtr *time.Time
+		if postedAt.Valid {
+			value := postedAt.Time
+			postedAtPtr = &value
+		}
+		transfers = append(transfers, Transfer{
+			ID:                   uuidFromPg(id),
+			Type:                 TransferType(transferType),
+			Status:               TransferStatus(status),
+			Amount:               amount,
+			Currency:             currency,
+			SourceAccountID:      uuidPtrFromPg(sourceAccountID),
+			DestinationAccountID: uuidPtrFromPg(destinationAccountID),
+			Reference:            textPtrFromPg(reference),
+			ReversesTransferID:   uuidPtrFromPg(reversesTransferID),
+			Metadata:             json.RawMessage(metadata),
+			CreatedAt:            createdAt,
+			PostedAt:             postedAtPtr,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	var nextCursor *uuid.UUID
+	if len(transfers) > limit {
+		transfers = transfers[:limit]
+		value := transfers[len(transfers)-1].ID
+		nextCursor = &value
+	}
+	return transfers, nextCursor, nil
 }
 
 func isUniqueViolation(err error) bool {

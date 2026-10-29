@@ -91,3 +91,23 @@ type DiscrepanciesPage struct {
 	Data       []Discrepancy
 	NextCursor *string
 }
+
+type ListRunsInput struct {
+	Cursor string
+	Limit  int
+}
+
+type RunsPage struct {
+	Data       []ReconciliationRun
+	NextCursor *string
+}
+
+type ListSettlementFilesInput struct {
+	Cursor string
+	Limit  int
+}
+
+type SettlementFilesPage struct {
+	Data       []SettlementFile
+	NextCursor *string
+}

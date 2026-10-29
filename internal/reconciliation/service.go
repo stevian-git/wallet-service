@@ -151,8 +151,148 @@ func (s *Service) Reconciler() *Reconciler {
 	return s.reconciler
 }
 
+func (s *Service) ListRuns(ctx context.Context, input ListRunsInput) (RunsPage, error) {
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	cursorID, err := decodeReconCursorUUID(input.Cursor)
+	if err != nil {
+		return RunsPage{}, err
+	}
+
+	var query strings.Builder
+	var args []any
+	argIdx := 1
+
+	query.WriteString(`
+		SELECT id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error
+		FROM reconciliation_runs
+		WHERE 1=1`)
+
+	if cursorID != nil {
+		query.WriteString(fmt.Sprintf(" AND id < $%d", argIdx))
+		args = append(args, *cursorID)
+		argIdx++
+	}
+
+	query.WriteString(fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", argIdx))
+	args = append(args, limit+1)
+
+	rows, err := s.pool.Query(ctx, query.String(), args...)
+	if err != nil {
+		return RunsPage{}, err
+	}
+	defer rows.Close()
+
+	var runs []ReconciliationRun
+	for rows.Next() {
+		var r ReconciliationRun
+		if err := rows.Scan(&r.ID, &r.FileID, &r.Status, &r.StartedAt, &r.FinishedAt, &r.MatchedCount, &r.DiscrepancyCount, &r.Error); err != nil {
+			return RunsPage{}, err
+		}
+		runs = append(runs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return RunsPage{}, err
+	}
+
+	var nextCursor *string
+	if len(runs) > limit {
+		lastID := runs[limit-1].ID
+		cursor := encodeReconCursorUUID(lastID)
+		nextCursor = &cursor
+		runs = runs[:limit]
+	}
+
+	if runs == nil {
+		runs = []ReconciliationRun{}
+	}
+
+	return RunsPage{
+		Data:       runs,
+		NextCursor: nextCursor,
+	}, nil
+}
+
+func (s *Service) ListSettlementFiles(ctx context.Context, input ListSettlementFilesInput) (SettlementFilesPage, error) {
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	cursorID, err := decodeReconCursorUUID(input.Cursor)
+	if err != nil {
+		return SettlementFilesPage{}, err
+	}
+
+	var query strings.Builder
+	var args []any
+	argIdx := 1
+
+	query.WriteString(`
+		SELECT id, provider, file_name, file_sha256, settlement_date, record_count, imported_at
+		FROM settlement_files
+		WHERE 1=1`)
+
+	if cursorID != nil {
+		query.WriteString(fmt.Sprintf(" AND id < $%d", argIdx))
+		args = append(args, *cursorID)
+		argIdx++
+	}
+
+	query.WriteString(fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", argIdx))
+	args = append(args, limit+1)
+
+	rows, err := s.pool.Query(ctx, query.String(), args...)
+	if err != nil {
+		return SettlementFilesPage{}, err
+	}
+	defer rows.Close()
+
+	var files []SettlementFile
+	for rows.Next() {
+		var f SettlementFile
+		if err := rows.Scan(&f.ID, &f.Provider, &f.FileName, &f.FileSHA256, &f.SettlementDate, &f.RecordCount, &f.ImportedAt); err != nil {
+			return SettlementFilesPage{}, err
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return SettlementFilesPage{}, err
+	}
+
+	var nextCursor *string
+	if len(files) > limit {
+		lastID := files[limit-1].ID
+		cursor := encodeReconCursorUUID(lastID)
+		nextCursor = &cursor
+		files = files[:limit]
+	}
+
+	if files == nil {
+		files = []SettlementFile{}
+	}
+
+	return SettlementFilesPage{
+		Data:       files,
+		NextCursor: nextCursor,
+	}, nil
+}
+
 func encodeReconCursor(id int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
+}
+
+func encodeReconCursorUUID(id uuid.UUID) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(id.String()))
 }
 
 func decodeReconCursor(cursor string) (*int64, error) {
@@ -165,6 +305,21 @@ func decodeReconCursor(cursor string) (*int64, error) {
 	}
 	id, err := strconv.ParseInt(string(raw), 10, 64)
 	if err != nil || id <= 0 {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	return &id, nil
+}
+
+func decodeReconCursorUUID(cursor string) (*uuid.UUID, error) {
+	if cursor == "" {
+		return nil, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	id, err := uuid.Parse(string(raw))
+	if err != nil {
 		return nil, fmt.Errorf("invalid cursor")
 	}
 	return &id, nil

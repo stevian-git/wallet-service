@@ -182,6 +182,41 @@ Environment:
 - `OTEL_SERVICE_NAME` (per-binary defaults)
 - `OTEL_SDK_DISABLED=true` disables tracing entirely
 
+## Admin Dashboard
+
+React + Vite + Tailwind + shadcn/ui dashboard for browsing accounts, transfers,
+reconciliation runs, and ledger integrity.
+
+```bash
+make dashboard-dev    # start dev server at http://localhost:5173
+make dashboard-build  # production build → dashboard/dist/
+```
+
+Environment variables (or input in the UI):
+
+- `VITE_API_URL` (default `http://localhost:8080`)
+- `VITE_API_KEY` (fallback: type in the API Key dialog)
+
+Pages:
+
+| Page | Route | Description |
+|---|---|---|
+| Accounts | `/accounts` | List all accounts with cursor pagination |
+| Account detail | `/accounts/:id` | Balance (posted/held/available) + paginated ledger entries |
+| Transfers | `/transfers` | List all transfers with cursor pagination |
+| Transfer detail | `/transfers/:id` | Transfer info + debit/credit ledger entries |
+| Reconciliation | `/reconciliation` | List runs, click to view discrepancies with filters |
+| Integrity | `/integrity` | Green/red status for balance drift, unbalanced transfers |
+
+Screenshots:
+
+![Accounts list](docs/screenshots/accounts-list.png)
+![Account detail](docs/screenshots/account-detail.png)
+![Transfers list](docs/screenshots/transfers-list.png)
+![Transfer detail](docs/screenshots/transfer-detail.png)
+![Reconciliation](docs/screenshots/reconciliation.png)
+![Integrity](docs/screenshots/integrity.png)
+
 ## Load tests
 
 Requires [k6](https://k6.io/) installed on `PATH`.
