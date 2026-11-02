@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { APIError } from '@/lib/api'
 
 interface CursorPaginationState<T> {
@@ -57,6 +57,10 @@ export function useCursorPagination<T>(
   const refresh = useCallback(() => {
     setCursors([null])
     setCurrentPage(0)
+    load(null, 0)
+  }, [load])
+
+  useEffect(() => {
     load(null, 0)
   }, [load])
 

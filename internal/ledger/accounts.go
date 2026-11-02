@@ -119,6 +119,8 @@ func (l *Ledger) ListAccounts(ctx context.Context, afterID *uuid.UUID, limit int
 	var cursor pgtype.UUID
 	if afterID != nil {
 		cursor = toPgUUID(*afterID)
+	} else {
+		cursor = toPgUUID(uuid.Nil)
 	}
 
 	rows, err := l.pool.Query(ctx, `
@@ -390,6 +392,8 @@ func (l *Ledger) ListTransfers(ctx context.Context, afterID *uuid.UUID, limit in
 	var cursor pgtype.UUID
 	if afterID != nil {
 		cursor = toPgUUID(*afterID)
+	} else {
+		cursor = toPgUUID(uuid.Nil)
 	}
 
 	rows, err := l.pool.Query(ctx, `
