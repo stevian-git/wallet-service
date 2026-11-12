@@ -205,17 +205,53 @@ Pages:
 | Account detail | `/accounts/:id` | Balance (posted/held/available) + paginated ledger entries |
 | Transfers | `/transfers` | List all transfers with cursor pagination |
 | Transfer detail | `/transfers/:id` | Transfer info + debit/credit ledger entries |
-| Reconciliation | `/reconciliation` | List runs, click to view discrepancies with filters |
+| Reconciliation | `/reconciliation` | List reconciliation runs |
+| Reconciliation run | `/reconciliation/:runId` | Run summary + discrepancies with resolution filter |
 | Integrity | `/integrity` | Green/red status for balance drift, unbalanced transfers |
 
-Screenshots:
+### Screenshots
+
+#### Accounts
+
+Account list:
 
 ![Accounts list](docs/screenshots/accounts-list.png)
+
+Account detail with posted/held/available balance and ledger entries:
+
 ![Account detail](docs/screenshots/account-detail.png)
+
+#### Transfers
+
+Transfer list:
+
 ![Transfers list](docs/screenshots/transfers-list.png)
+
+Transfer detail with its debit/credit entries:
+
 ![Transfer detail](docs/screenshots/transfer-detail.png)
-![Reconciliation](docs/screenshots/reconciliation.png)
+
+#### Reconciliation
+
+Run list:
+
+![Reconciliation runs](docs/screenshots/reconciliation.png)
+
+Run detail with discrepancies (amount mismatch, record missing in ledger):
+
+![Reconciliation run detail](docs/screenshots/reconciliation-run.png)
+
+#### Integrity
+
 ![Integrity](docs/screenshots/integrity.png)
+
+To regenerate the screenshots, run the API and the dashboard dev server, then:
+
+```bash
+make dashboard-screenshots
+# Optional: pin the detail pages to specific records
+#   ACCOUNT_ID=... TRANSFER_ID=... RUN_ID=... API_URL=http://localhost:8080
+```
 
 ## Load tests
 
