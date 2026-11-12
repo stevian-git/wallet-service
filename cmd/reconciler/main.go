@@ -54,22 +54,20 @@ func main() {
 	logger.Info("reconciler worker started", "poll_interval", cfg.PollInterval)
 
 	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("reconciler worker shutting down")
-			return
-		default:
-		}
-
 		run, err := reconciler.ClaimRun(ctx)
 		if err != nil {
-			logger.Error("claim run", "error", err)
-			time.Sleep(cfg.PollInterval)
+			if ctx.Err() == nil {
+				logger.Error("claim run", "error", err)
+			}
+			if !sleep(ctx, cfg.PollInterval) {
+				break
+			}
 			continue
 		}
-
 		if run == nil {
-			time.Sleep(cfg.PollInterval)
+			if !sleep(ctx, cfg.PollInterval) {
+				break
+			}
 			continue
 		}
 
@@ -89,5 +87,18 @@ func main() {
 		}
 
 		logger.Info("reconciliation run completed", "run_id", run.ID)
+	}
+	logger.Info("reconciler worker shutting down")
+}
+
+// sleep waits for d or until ctx is cancelled; it reports whether to keep going.
+func sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }

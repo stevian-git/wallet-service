@@ -11,6 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// resolutionOpen is the initial resolution of every discrepancy a run records.
+const resolutionOpen = "open"
+
 type transferRow struct {
 	ID          uuid.UUID
 	Reference   string
@@ -29,8 +32,7 @@ func NewReconciler(pool *pgxpool.Pool) *Reconciler {
 }
 
 func (r *Reconciler) ClaimRun(ctx context.Context) (*ReconciliationRun, error) {
-	var run ReconciliationRun
-	err := r.pool.QueryRow(ctx, `
+	run, err := scanRun(r.pool.QueryRow(ctx, `
 		UPDATE reconciliation_runs
 		SET status = 'running'
 		WHERE id = (
@@ -40,11 +42,7 @@ func (r *Reconciler) ClaimRun(ctx context.Context) (*ReconciliationRun, error) {
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error
-	`).Scan(
-		&run.ID, &run.FileID, &run.Status, &run.StartedAt,
-		&run.FinishedAt, &run.MatchedCount, &run.DiscrepancyCount, &run.Error,
-	)
+		RETURNING `+runColumns))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -83,31 +81,20 @@ func (r *Reconciler) Execute(ctx context.Context, run ReconciliationRun) error {
 
 	discrepancies, matchedCount := compare(settlementRecords, transfers)
 
-	batchSize := 500
-	for start := 0; start < len(discrepancies); start += batchSize {
-		end := start + batchSize
-		if end > len(discrepancies) {
-			end = len(discrepancies)
-		}
-		batch := discrepancies[start:end]
-
-		rows := make([][]any, 0, len(batch))
-		for _, d := range batch {
-			rows = append(rows, []any{
+	_, err = tx.CopyFrom(ctx,
+		pgx.Identifier{"reconciliation_discrepancies"},
+		[]string{"run_id", "kind", "transfer_id", "settlement_record_id",
+			"expected_amount", "actual_amount", "resolution", "note"},
+		pgx.CopyFromSlice(len(discrepancies), func(i int) ([]any, error) {
+			d := discrepancies[i]
+			return []any{
 				run.ID, string(d.Kind), d.TransferID, d.SettlementRecordID,
 				d.ExpectedAmount, d.ActualAmount, d.Resolution, d.Note,
-			})
-		}
-
-		_, err = tx.CopyFrom(ctx,
-			pgx.Identifier{"reconciliation_discrepancies"},
-			[]string{"run_id", "kind", "transfer_id", "settlement_record_id",
-				"expected_amount", "actual_amount", "resolution", "note"},
-			pgx.CopyFromRows(rows),
-		)
-		if err != nil {
-			return fmt.Errorf("insert discrepancies: %w", err)
-		}
+			}, nil
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("insert discrepancies: %w", err)
 	}
 
 	now := time.Now().UTC()
@@ -142,18 +129,12 @@ func loadSettlementRecords(ctx context.Context, tx pgx.Tx, fileID uuid.UUID) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var records []SettlementRecord
-	for rows.Next() {
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (SettlementRecord, error) {
 		var rec SettlementRecord
-		if err := rows.Scan(&rec.ID, &rec.FileID, &rec.ProviderRef, &rec.OurReference,
-			&rec.Amount, &rec.Currency, &rec.Status, &rec.OccurredAt); err != nil {
-			return nil, err
-		}
-		records = append(records, rec)
-	}
-	return records, rows.Err()
+		err := row.Scan(&rec.ID, &rec.FileID, &rec.ProviderRef, &rec.OurReference,
+			&rec.Amount, &rec.Currency, &rec.Status, &rec.OccurredAt)
+		return rec, err
+	})
 }
 
 func loadTransfersInScope(ctx context.Context, tx pgx.Tx, settlementDate time.Time) ([]transferRow, error) {
@@ -173,17 +154,11 @@ func loadTransfersInScope(ctx context.Context, tx pgx.Tx, settlementDate time.Ti
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var transfers []transferRow
-	for rows.Next() {
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (transferRow, error) {
 		var t transferRow
-		if err := rows.Scan(&t.ID, &t.Reference, &t.Amount, &t.Currency, &t.Status, &t.HasReversal); err != nil {
-			return nil, err
-		}
-		transfers = append(transfers, t)
-	}
-	return transfers, rows.Err()
+		err := row.Scan(&t.ID, &t.Reference, &t.Amount, &t.Currency, &t.Status, &t.HasReversal)
+		return t, err
+	})
 }
 
 func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrepancy, int) {
@@ -212,7 +187,7 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 				Kind:               DiscrepancyDuplicateInSettlement,
 				SettlementRecordID: &firstID,
 				Note:               strPtr(fmt.Sprintf("duplicate our_reference: %s (count: %d)", ref, len(recs))),
-				Resolution:         "open",
+				Resolution:         resolutionOpen,
 			})
 		}
 
@@ -224,7 +199,7 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 					Kind:               DiscrepancyMissingInLedger,
 					SettlementRecordID: &recID,
 					Note:               strPtr("settlement record has no matching transfer"),
-					Resolution:         "open",
+					Resolution:         resolutionOpen,
 				})
 			}
 			continue
@@ -254,7 +229,7 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 				ExpectedAmount:     &expected,
 				ActualAmount:       &actual,
 				Note:               strPtr(fmt.Sprintf("expected %d, got %d", expected, actual)),
-				Resolution:         "open",
+				Resolution:         resolutionOpen,
 			})
 		}
 
@@ -282,7 +257,7 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 				TransferID:         &tID,
 				SettlementRecordID: &recID,
 				Note:               strPtr(fmt.Sprintf("transfer has_reversal=%v, settlement has_reversed=%v", transferHasReversal, settlementReversed)),
-				Resolution:         "open",
+				Resolution:         resolutionOpen,
 			})
 		}
 	}
@@ -293,26 +268,19 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 			Kind:               DiscrepancyMissingInLedger,
 			SettlementRecordID: &recID,
 			Note:               strPtr("settlement record has null our_reference"),
-			Resolution:         "open",
+			Resolution:         resolutionOpen,
 		})
 	}
 
-	matchedRefs := make(map[string]bool)
-	for ref := range settlementByRef {
-		if _, hasTransfer := transferByRef[ref]; hasTransfer {
-			matchedRefs[ref] = true
-		}
-	}
-
 	for ref, transfersForRef := range transferByRef {
-		if !matchedRefs[ref] {
+		if _, settled := settlementByRef[ref]; !settled {
 			for _, t := range transfersForRef {
 				tID := t.ID
 				discrepancies = append(discrepancies, Discrepancy{
 					Kind:       DiscrepancyMissingInSettlement,
 					TransferID: &tID,
 					Note:       strPtr(fmt.Sprintf("transfer %s has no matching settlement record", ref)),
-					Resolution: "open",
+					Resolution: resolutionOpen,
 				})
 			}
 		}

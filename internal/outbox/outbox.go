@@ -99,13 +99,22 @@ func (s *Store) Claim(ctx context.Context, tx pgx.Tx, limit int) ([]Event, error
 	return events, nil
 }
 
-func (s *Store) MarkPublished(ctx context.Context, tx pgx.Tx, eventID int64) error {
+// Begin starts the transaction that claims, publishes, and marks a batch.
+func (s *Store) Begin(ctx context.Context) (pgx.Tx, error) {
+	return s.pool.Begin(ctx)
+}
+
+// MarkPublished marks the given events published in a single statement.
+func (s *Store) MarkPublished(ctx context.Context, tx pgx.Tx, eventIDs ...int64) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
 	_, err := tx.Exec(ctx, `
 		UPDATE outbox_events
 		   SET published_at = now(), attempts = attempts + 1, last_error = NULL
-		 WHERE id = $1`, eventID)
+		 WHERE id = ANY($1)`, eventIDs)
 	if err != nil {
-		return fmt.Errorf("mark outbox event %d published: %w", eventID, err)
+		return fmt.Errorf("mark %d outbox events published: %w", len(eventIDs), err)
 	}
 	return nil
 }
@@ -177,7 +186,7 @@ func (r *Relay) Run(ctx context.Context) error {
 }
 
 func (r *Relay) RunOnce(ctx context.Context) (int, error) {
-	tx, err := r.store.pool.Begin(ctx)
+	tx, err := r.store.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin outbox transaction: %w", err)
 	}
@@ -194,26 +203,29 @@ func (r *Relay) RunOnce(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	published := 0
+	// Published IDs are marked in one UPDATE, either at the end of the batch or
+	// just before committing the failure of a later event in it.
+	publishedIDs := make([]int64, 0, len(events))
 	for _, event := range events {
 		eventCtx := telemetry.ExtractTrace(ctx, event.Headers)
 		if err := r.publisher.Publish(eventCtx, event); err != nil {
+			publishErr := fmt.Errorf("publish outbox event %d: %w", event.ID, err)
 			failureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			markErr := r.store.MarkFailed(failureCtx, tx, event.ID, err)
+			markErr := errors.Join(
+				r.store.MarkPublished(failureCtx, tx, publishedIDs...),
+				r.store.MarkFailed(failureCtx, tx, event.ID, err),
+			)
 			commitErr := tx.Commit(failureCtx)
 			cancel()
 			if markErr != nil {
-				return published, errors.Join(fmt.Errorf("publish outbox event %d: %w", event.ID, err), markErr)
+				return len(publishedIDs), errors.Join(publishErr, markErr)
 			}
 			if commitErr != nil {
-				return published, errors.Join(fmt.Errorf("publish outbox event %d: %w", event.ID, err), commitErr)
+				return len(publishedIDs), errors.Join(publishErr, commitErr)
 			}
-			return published, fmt.Errorf("publish outbox event %d (%s): %w", event.ID, event.EventType, err)
+			return len(publishedIDs), fmt.Errorf("publish outbox event %d (%s): %w", event.ID, event.EventType, err)
 		}
-		if err := r.store.MarkPublished(ctx, tx, event.ID); err != nil {
-			return published, err
-		}
-		published++
+		publishedIDs = append(publishedIDs, event.ID)
 		r.logger.Info("outbox event published",
 			"event_id", event.ID,
 			"event_type", event.EventType,
@@ -222,10 +234,13 @@ func (r *Relay) RunOnce(ctx context.Context) (int, error) {
 		)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return published, fmt.Errorf("commit outbox batch: %w", err)
+	if err := r.store.MarkPublished(ctx, tx, publishedIDs...); err != nil {
+		return 0, err
 	}
-	return published, nil
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit outbox batch: %w", err)
+	}
+	return len(publishedIDs), nil
 }
 
 func nextBackoff(current, max time.Duration) time.Duration {

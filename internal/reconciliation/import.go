@@ -1,6 +1,7 @@
 package reconciliation
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/csv"
@@ -89,30 +90,21 @@ func (imp *Importer) Import(ctx context.Context, input ImportInput) (SettlementF
 		settlementRecords = append(settlementRecords, rec)
 	}
 
-	batchSize := 500
-	for start := 0; start < len(settlementRecords); start += batchSize {
-		end := start + batchSize
-		if end > len(settlementRecords) {
-			end = len(settlementRecords)
-		}
-		batch := settlementRecords[start:end]
-
-		rows := make([][]any, 0, len(batch))
-		for _, rec := range batch {
-			rows = append(rows, []any{
+	// One COPY streams every row; there is no need to chunk or to materialise
+	// a second [][]any copy of the file in memory.
+	_, err = tx.CopyFrom(ctx,
+		pgx.Identifier{"settlement_records"},
+		[]string{"file_id", "provider_ref", "our_reference", "amount", "currency", "status", "occurred_at"},
+		pgx.CopyFromSlice(len(settlementRecords), func(i int) ([]any, error) {
+			rec := settlementRecords[i]
+			return []any{
 				rec.FileID, rec.ProviderRef, rec.OurReference,
 				rec.Amount, rec.Currency, rec.Status, rec.OccurredAt,
-			})
-		}
-
-		_, err = tx.CopyFrom(ctx,
-			pgx.Identifier{"settlement_records"},
-			[]string{"file_id", "provider_ref", "our_reference", "amount", "currency", "status", "occurred_at"},
-			pgx.CopyFromRows(rows),
-		)
-		if err != nil {
-			return SettlementFile{}, err
-		}
+			}, nil
+		}),
+	)
+	if err != nil {
+		return SettlementFile{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -123,7 +115,7 @@ func (imp *Importer) Import(ctx context.Context, input ImportInput) (SettlementF
 }
 
 func parseCSV(content []byte) ([][]string, error) {
-	reader := csv.NewReader(strings.NewReader(string(content)))
+	reader := csv.NewReader(bytes.NewReader(content))
 	reader.TrimLeadingSpace = true
 
 	header, err := reader.Read()

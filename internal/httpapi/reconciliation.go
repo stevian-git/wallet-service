@@ -3,7 +3,6 @@ package httpapi
 import (
 	"io"
 	"net/http"
-	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/stevians/wallet-service/internal/app"
@@ -94,14 +93,10 @@ func (s *Server) handleListDiscrepancies(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || parsed < 1 || parsed > 200 {
-			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
-			return
-		}
-		limit = parsed
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
 	}
 
 	var resolution *string
@@ -125,14 +120,10 @@ func (s *Server) handleListDiscrepancies(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleListReconciliationRuns(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || parsed < 1 || parsed > 200 {
-			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
-			return
-		}
-		limit = parsed
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
 	}
 
 	cursor := r.URL.Query().Get("cursor")
@@ -147,14 +138,10 @@ func (s *Server) handleListReconciliationRuns(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleListSettlementFiles(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || parsed < 1 || parsed > 200 {
-			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
-			return
-		}
-		limit = parsed
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
 	}
 
 	cursor := r.URL.Query().Get("cursor")

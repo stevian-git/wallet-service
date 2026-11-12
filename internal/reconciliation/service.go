@@ -2,16 +2,29 @@ package reconciliation
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
-	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stevians/wallet-service/internal/pagination"
 )
+
+var (
+	ErrRunNotFound  = errors.New("reconciliation run not found")
+	ErrFileNotFound = errors.New("settlement file not found")
+)
+
+const runColumns = `id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error`
+
+func scanRun(row pgx.Row) (ReconciliationRun, error) {
+	var run ReconciliationRun
+	err := row.Scan(
+		&run.ID, &run.FileID, &run.Status, &run.StartedAt,
+		&run.FinishedAt, &run.MatchedCount, &run.DiscrepancyCount, &run.Error,
+	)
+	return run, err
+}
 
 type Service struct {
 	pool       *pgxpool.Pool
@@ -31,6 +44,10 @@ func (s *Service) Import(ctx context.Context, input ImportInput) (SettlementFile
 	return s.importer.Import(ctx, input)
 }
 
+func (s *Service) Reconciler() *Reconciler {
+	return s.reconciler
+}
+
 func (s *Service) CreateRun(ctx context.Context, input CreateRunInput) (ReconciliationRun, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM settlement_files WHERE id = $1)`, input.FileID).Scan(&exists)
@@ -38,289 +55,129 @@ func (s *Service) CreateRun(ctx context.Context, input CreateRunInput) (Reconcil
 		return ReconciliationRun{}, err
 	}
 	if !exists {
-		return ReconciliationRun{}, errors.New("settlement file not found")
+		return ReconciliationRun{}, ErrFileNotFound
 	}
 
-	var run ReconciliationRun
-	err = s.pool.QueryRow(ctx, `
+	return scanRun(s.pool.QueryRow(ctx, `
 		INSERT INTO reconciliation_runs (id, file_id)
 		VALUES ($1, $2)
-		RETURNING id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error
-	`, uuid.New(), input.FileID).Scan(
-		&run.ID, &run.FileID, &run.Status, &run.StartedAt,
-		&run.FinishedAt, &run.MatchedCount, &run.DiscrepancyCount, &run.Error,
-	)
-	return run, err
+		RETURNING `+runColumns, uuid.New(), input.FileID))
 }
 
 func (s *Service) GetRun(ctx context.Context, runID uuid.UUID) (ReconciliationRun, error) {
-	var run ReconciliationRun
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error
-		FROM reconciliation_runs
-		WHERE id = $1
-	`, runID).Scan(
-		&run.ID, &run.FileID, &run.Status, &run.StartedAt,
-		&run.FinishedAt, &run.MatchedCount, &run.DiscrepancyCount, &run.Error,
-	)
+	run, err := scanRun(s.pool.QueryRow(ctx,
+		`SELECT `+runColumns+` FROM reconciliation_runs WHERE id = $1`, runID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ReconciliationRun{}, fmt.Errorf("reconciliation run not found")
+		return ReconciliationRun{}, ErrRunNotFound
 	}
 	return run, err
 }
 
 func (s *Service) ListDiscrepancies(ctx context.Context, input ListDiscrepanciesInput) (DiscrepanciesPage, error) {
-	limit := input.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
-	cursorID, err := decodeReconCursor(input.Cursor)
+	limit := pagination.ClampLimit(input.Limit)
+	afterID, err := pagination.DecodeInt64(input.Cursor)
 	if err != nil {
 		return DiscrepanciesPage{}, err
 	}
 
-	var query strings.Builder
-	var args []any
-	argIdx := 1
-
-	query.WriteString(`
+	rows, err := s.pool.Query(ctx, `
 		SELECT id, run_id, kind, transfer_id, settlement_record_id,
 		       expected_amount, actual_amount, resolution, note, created_at
-		FROM reconciliation_discrepancies
-		WHERE run_id = $1`)
-	args = append(args, input.RunID)
-	argIdx++
-
-	if input.Resolution != nil {
-		query.WriteString(fmt.Sprintf(" AND resolution = $%d", argIdx))
-		args = append(args, *input.Resolution)
-		argIdx++
-	}
-
-	if cursorID != nil {
-		query.WriteString(fmt.Sprintf(" AND id > $%d", argIdx))
-		args = append(args, *cursorID)
-		argIdx++
-	}
-
-	query.WriteString(fmt.Sprintf(" ORDER BY id LIMIT $%d", argIdx))
-	args = append(args, limit+1)
-
-	rows, err := s.pool.Query(ctx, query.String(), args...)
+		  FROM reconciliation_discrepancies
+		 WHERE run_id = $1
+		   AND ($2::text IS NULL OR resolution = $2)
+		   AND ($3::bigint IS NULL OR id > $3)
+		 ORDER BY id
+		 LIMIT $4`, input.RunID, input.Resolution, afterID, limit+1)
 	if err != nil {
 		return DiscrepanciesPage{}, err
 	}
-	defer rows.Close()
-
-	var discrepancies []Discrepancy
-	for rows.Next() {
+	discrepancies, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Discrepancy, error) {
 		var d Discrepancy
-		if err := rows.Scan(&d.ID, &d.RunID, &d.Kind, &d.TransferID, &d.SettlementRecordID,
-			&d.ExpectedAmount, &d.ActualAmount, &d.Resolution, &d.Note, &d.CreatedAt); err != nil {
-			return DiscrepanciesPage{}, err
-		}
-		discrepancies = append(discrepancies, d)
-	}
-	if err := rows.Err(); err != nil {
+		err := row.Scan(&d.ID, &d.RunID, &d.Kind, &d.TransferID, &d.SettlementRecordID,
+			&d.ExpectedAmount, &d.ActualAmount, &d.Resolution, &d.Note, &d.CreatedAt)
+		return d, err
+	})
+	if err != nil {
 		return DiscrepanciesPage{}, err
 	}
 
-	var nextCursor *string
-	if len(discrepancies) > limit {
-		lastID := discrepancies[limit-1].ID
-		cursor := encodeReconCursor(lastID)
-		nextCursor = &cursor
-		discrepancies = discrepancies[:limit]
-	}
-
-	if discrepancies == nil {
-		discrepancies = []Discrepancy{}
-	}
-
-	return DiscrepanciesPage{
-		Data:       discrepancies,
-		NextCursor: nextCursor,
-	}, nil
-}
-
-func (s *Service) Reconciler() *Reconciler {
-	return s.reconciler
+	page := DiscrepanciesPage{}
+	page.Data, page.NextCursor = trimPage(discrepancies, limit, func(d Discrepancy) string {
+		return pagination.EncodeInt64(d.ID)
+	})
+	return page, nil
 }
 
 func (s *Service) ListRuns(ctx context.Context, input ListRunsInput) (RunsPage, error) {
-	limit := input.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
-	cursorID, err := decodeReconCursorUUID(input.Cursor)
+	limit := pagination.ClampLimit(input.Limit)
+	beforeID, err := pagination.DecodeUUID(input.Cursor)
 	if err != nil {
 		return RunsPage{}, err
 	}
 
-	var query strings.Builder
-	var args []any
-	argIdx := 1
-
-	query.WriteString(`
-		SELECT id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error
-		FROM reconciliation_runs
-		WHERE 1=1`)
-
-	if cursorID != nil {
-		query.WriteString(fmt.Sprintf(" AND id < $%d", argIdx))
-		args = append(args, *cursorID)
-		argIdx++
-	}
-
-	query.WriteString(fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", argIdx))
-	args = append(args, limit+1)
-
-	rows, err := s.pool.Query(ctx, query.String(), args...)
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+runColumns+`
+		  FROM reconciliation_runs
+		 WHERE ($1::uuid IS NULL OR id < $1)
+		 ORDER BY id DESC
+		 LIMIT $2`, beforeID, limit+1)
 	if err != nil {
 		return RunsPage{}, err
 	}
-	defer rows.Close()
-
-	var runs []ReconciliationRun
-	for rows.Next() {
-		var r ReconciliationRun
-		if err := rows.Scan(&r.ID, &r.FileID, &r.Status, &r.StartedAt, &r.FinishedAt, &r.MatchedCount, &r.DiscrepancyCount, &r.Error); err != nil {
-			return RunsPage{}, err
-		}
-		runs = append(runs, r)
-	}
-	if err := rows.Err(); err != nil {
+	runs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ReconciliationRun, error) {
+		return scanRun(row)
+	})
+	if err != nil {
 		return RunsPage{}, err
 	}
 
-	var nextCursor *string
-	if len(runs) > limit {
-		lastID := runs[limit-1].ID
-		cursor := encodeReconCursorUUID(lastID)
-		nextCursor = &cursor
-		runs = runs[:limit]
-	}
-
-	if runs == nil {
-		runs = []ReconciliationRun{}
-	}
-
-	return RunsPage{
-		Data:       runs,
-		NextCursor: nextCursor,
-	}, nil
+	page := RunsPage{}
+	page.Data, page.NextCursor = trimPage(runs, limit, func(r ReconciliationRun) string {
+		return pagination.EncodeUUID(r.ID)
+	})
+	return page, nil
 }
 
 func (s *Service) ListSettlementFiles(ctx context.Context, input ListSettlementFilesInput) (SettlementFilesPage, error) {
-	limit := input.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
-	cursorID, err := decodeReconCursorUUID(input.Cursor)
+	limit := pagination.ClampLimit(input.Limit)
+	beforeID, err := pagination.DecodeUUID(input.Cursor)
 	if err != nil {
 		return SettlementFilesPage{}, err
 	}
 
-	var query strings.Builder
-	var args []any
-	argIdx := 1
-
-	query.WriteString(`
+	rows, err := s.pool.Query(ctx, `
 		SELECT id, provider, file_name, file_sha256, settlement_date, record_count, imported_at
-		FROM settlement_files
-		WHERE 1=1`)
-
-	if cursorID != nil {
-		query.WriteString(fmt.Sprintf(" AND id < $%d", argIdx))
-		args = append(args, *cursorID)
-		argIdx++
-	}
-
-	query.WriteString(fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", argIdx))
-	args = append(args, limit+1)
-
-	rows, err := s.pool.Query(ctx, query.String(), args...)
+		  FROM settlement_files
+		 WHERE ($1::uuid IS NULL OR id < $1)
+		 ORDER BY id DESC
+		 LIMIT $2`, beforeID, limit+1)
 	if err != nil {
 		return SettlementFilesPage{}, err
 	}
-	defer rows.Close()
-
-	var files []SettlementFile
-	for rows.Next() {
+	files, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SettlementFile, error) {
 		var f SettlementFile
-		if err := rows.Scan(&f.ID, &f.Provider, &f.FileName, &f.FileSHA256, &f.SettlementDate, &f.RecordCount, &f.ImportedAt); err != nil {
-			return SettlementFilesPage{}, err
-		}
-		files = append(files, f)
-	}
-	if err := rows.Err(); err != nil {
+		err := row.Scan(&f.ID, &f.Provider, &f.FileName, &f.FileSHA256, &f.SettlementDate, &f.RecordCount, &f.ImportedAt)
+		return f, err
+	})
+	if err != nil {
 		return SettlementFilesPage{}, err
 	}
 
-	var nextCursor *string
-	if len(files) > limit {
-		lastID := files[limit-1].ID
-		cursor := encodeReconCursorUUID(lastID)
-		nextCursor = &cursor
-		files = files[:limit]
-	}
-
-	if files == nil {
-		files = []SettlementFile{}
-	}
-
-	return SettlementFilesPage{
-		Data:       files,
-		NextCursor: nextCursor,
-	}, nil
+	page := SettlementFilesPage{}
+	page.Data, page.NextCursor = trimPage(files, limit, func(f SettlementFile) string {
+		return pagination.EncodeUUID(f.ID)
+	})
+	return page, nil
 }
 
-func encodeReconCursor(id int64) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
-}
-
-func encodeReconCursorUUID(id uuid.UUID) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(id.String()))
-}
-
-func decodeReconCursor(cursor string) (*int64, error) {
-	if cursor == "" {
-		return nil, nil
+// trimPage cuts a limit+1 result to limit and encodes the next cursor from the
+// last row kept, if there are more rows.
+func trimPage[T any](rows []T, limit int, cursorOf func(T) string) ([]T, *string) {
+	rows, more := pagination.Trim(rows, limit)
+	if !more {
+		return rows, nil
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil {
-		return nil, fmt.Errorf("invalid cursor")
-	}
-	id, err := strconv.ParseInt(string(raw), 10, 64)
-	if err != nil || id <= 0 {
-		return nil, fmt.Errorf("invalid cursor")
-	}
-	return &id, nil
-}
-
-func decodeReconCursorUUID(cursor string) (*uuid.UUID, error) {
-	if cursor == "" {
-		return nil, nil
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil {
-		return nil, fmt.Errorf("invalid cursor")
-	}
-	id, err := uuid.Parse(string(raw))
-	if err != nil {
-		return nil, fmt.Errorf("invalid cursor")
-	}
-	return &id, nil
+	cursor := cursorOf(rows[len(rows)-1])
+	return rows, &cursor
 }

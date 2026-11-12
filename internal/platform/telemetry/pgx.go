@@ -33,11 +33,7 @@ func (t *pgxTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.T
 }
 
 func (t *pgxTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	spanValue := ctx.Value(contextKey{})
-	if spanValue == nil {
-		return
-	}
-	span, ok := spanValue.(trace.Span)
+	span, ok := spanFrom(ctx)
 	if !ok {
 		return
 	}
@@ -59,19 +55,14 @@ func (t *pgxTracer) TraceBatchStart(ctx context.Context, _ *pgx.Conn, data pgx.T
 
 func (t *pgxTracer) TraceBatchQuery(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchQueryData) {
 	if data.Err != nil {
-		spanValue := ctx.Value(contextKey{})
-		if span, ok := spanValue.(trace.Span); ok {
+		if span, ok := spanFrom(ctx); ok {
 			span.RecordError(data.Err)
 		}
 	}
 }
 
 func (t *pgxTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchEndData) {
-	spanValue := ctx.Value(contextKey{})
-	if spanValue == nil {
-		return
-	}
-	span, ok := spanValue.(trace.Span)
+	span, ok := spanFrom(ctx)
 	if !ok {
 		return
 	}
@@ -91,11 +82,7 @@ func (t *pgxTracer) TraceCopyFromStart(ctx context.Context, _ *pgx.Conn, data pg
 }
 
 func (t *pgxTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceCopyFromEndData) {
-	spanValue := ctx.Value(contextKey{})
-	if spanValue == nil {
-		return
-	}
-	span, ok := spanValue.(trace.Span)
+	span, ok := spanFrom(ctx)
 	if !ok {
 		return
 	}
@@ -119,11 +106,7 @@ func (t *pgxTracer) TracePrepareStart(ctx context.Context, _ *pgx.Conn, data pgx
 }
 
 func (t *pgxTracer) TracePrepareEnd(ctx context.Context, _ *pgx.Conn, data pgx.TracePrepareEndData) {
-	spanValue := ctx.Value(contextKey{})
-	if spanValue == nil {
-		return
-	}
-	span, ok := spanValue.(trace.Span)
+	span, ok := spanFrom(ctx)
 	if !ok {
 		return
 	}
@@ -132,4 +115,9 @@ func (t *pgxTracer) TracePrepareEnd(ctx context.Context, _ *pgx.Conn, data pgx.T
 		span.SetStatus(codes.Error, data.Err.Error())
 	}
 	span.End()
+}
+
+func spanFrom(ctx context.Context) (trace.Span, bool) {
+	span, ok := ctx.Value(contextKey{}).(trace.Span)
+	return span, ok
 }

@@ -10,6 +10,24 @@ import (
 	"github.com/stevians/wallet-service/internal/ledger"
 )
 
+// postTransfer runs a money-moving ledger call under idempotency, records the
+// transfer outcome metric, and renders the 201 response.
+func (s *Service) postTransfer(
+	ctx context.Context,
+	meta Meta,
+	kind ledger.TransferType,
+	post func(ctx context.Context, tx pgx.Tx) (ledger.Transfer, error),
+) (Result, error) {
+	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
+		transfer, err := post(ctx, tx)
+		recordTransferOutcome(string(kind), err)
+		if err != nil {
+			return idempotency.Response{}, err
+		}
+		return jsonResponse(http.StatusCreated, transferView(transfer))
+	})
+}
+
 func (s *Service) Topup(ctx context.Context, meta Meta, req TopupRequest) (Result, error) {
 	if err := requireUUID(req.DestinationAccountID, "destination_account_id"); err != nil {
 		return Result{}, err
@@ -19,20 +37,14 @@ func (s *Service) Topup(ctx context.Context, meta Meta, req TopupRequest) (Resul
 		return Result{}, err
 	}
 
-	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
-		transfer, err := s.book.Topup(ctx, tx, ledger.TopupInput{
+	return s.postTransfer(ctx, meta, ledger.TransferTypeTopup, func(ctx context.Context, tx pgx.Tx) (ledger.Transfer, error) {
+		return s.book.Topup(ctx, tx, ledger.TopupInput{
 			DestinationAccountID: req.DestinationAccountID,
 			Amount:               req.Amount,
 			Currency:             req.Currency,
 			Reference:            req.Reference,
 			Metadata:             metadata,
 		})
-		if err != nil {
-			recordTransferOutcome(string(ledger.TransferTypeTopup), err)
-			return idempotency.Response{}, err
-		}
-		recordTransferOutcome(string(ledger.TransferTypeTopup), nil)
-		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }
 
@@ -51,8 +63,8 @@ func (s *Service) Transfer(ctx context.Context, meta Meta, req TransferRequest) 
 		return Result{}, err
 	}
 
-	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
-		transfer, err := s.book.Transfer(ctx, tx, ledger.TransferInput{
+	return s.postTransfer(ctx, meta, ledger.TransferTypeTransfer, func(ctx context.Context, tx pgx.Tx) (ledger.Transfer, error) {
+		return s.book.Transfer(ctx, tx, ledger.TransferInput{
 			SourceAccountID:      req.SourceAccountID,
 			DestinationAccountID: req.DestinationAccountID,
 			Amount:               req.Amount,
@@ -60,12 +72,6 @@ func (s *Service) Transfer(ctx context.Context, meta Meta, req TransferRequest) 
 			Reference:            req.Reference,
 			Metadata:             metadata,
 		})
-		if err != nil {
-			recordTransferOutcome(string(ledger.TransferTypeTransfer), err)
-			return idempotency.Response{}, err
-		}
-		recordTransferOutcome(string(ledger.TransferTypeTransfer), nil)
-		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }
 
@@ -78,20 +84,14 @@ func (s *Service) Withdrawal(ctx context.Context, meta Meta, req WithdrawalReque
 		return Result{}, err
 	}
 
-	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
-		transfer, err := s.book.Withdrawal(ctx, tx, ledger.WithdrawalInput{
+	return s.postTransfer(ctx, meta, ledger.TransferTypeWithdrawal, func(ctx context.Context, tx pgx.Tx) (ledger.Transfer, error) {
+		return s.book.Withdrawal(ctx, tx, ledger.WithdrawalInput{
 			SourceAccountID: req.SourceAccountID,
 			Amount:          req.Amount,
 			Currency:        req.Currency,
 			Reference:       req.Reference,
 			Metadata:        metadata,
 		})
-		if err != nil {
-			recordTransferOutcome(string(ledger.TransferTypeWithdrawal), err)
-			return idempotency.Response{}, err
-		}
-		recordTransferOutcome(string(ledger.TransferTypeWithdrawal), nil)
-		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }
 
@@ -100,14 +100,8 @@ func (s *Service) ReverseTransfer(ctx context.Context, meta Meta, transferID uui
 		return Result{}, validationError("reason must be at most 255 characters")
 	}
 
-	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
-		transfer, err := s.book.Reverse(ctx, tx, transferID, req.Reason)
-		if err != nil {
-			recordTransferOutcome(string(ledger.TransferTypeReversal), err)
-			return idempotency.Response{}, err
-		}
-		recordTransferOutcome(string(ledger.TransferTypeReversal), nil)
-		return jsonResponse(http.StatusCreated, transferView(transfer))
+	return s.postTransfer(ctx, meta, ledger.TransferTypeReversal, func(ctx context.Context, tx pgx.Tx) (ledger.Transfer, error) {
+		return s.book.Reverse(ctx, tx, transferID, req.Reason)
 	})
 }
 
@@ -120,33 +114,13 @@ func (s *Service) GetTransfer(ctx context.Context, transferID uuid.UUID) (Transf
 }
 
 func (s *Service) ListTransfers(ctx context.Context, cursor string, limit int) (TransfersPage, error) {
-	var afterID *uuid.UUID
-	if cursor != "" {
-		id, err := uuid.Parse(cursor)
-		if err != nil {
-			return TransfersPage{}, err
-		}
-		afterID = &id
-	}
-
-	transfers, nextCursor, err := s.book.ListTransfers(ctx, afterID, limit)
+	afterID, err := parseIDCursor(cursor)
 	if err != nil {
 		return TransfersPage{}, err
 	}
-
-	data := make([]TransferView, 0, len(transfers))
-	for _, t := range transfers {
-		data = append(data, transferView(t))
+	transfers, next, err := s.book.ListTransfers(ctx, afterID, limit)
+	if err != nil {
+		return TransfersPage{}, err
 	}
-
-	var nextCursorStr *string
-	if nextCursor != nil {
-		s := nextCursor.String()
-		nextCursorStr = &s
-	}
-
-	return TransfersPage{
-		Data:       data,
-		NextCursor: nextCursorStr,
-	}, nil
+	return TransfersPage{Data: mapSlice(transfers, transferView), NextCursor: idCursor(next)}, nil
 }

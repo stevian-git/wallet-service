@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/stevians/wallet-service/internal/app"
+	"github.com/stevians/wallet-service/internal/pagination"
 	"github.com/stevians/wallet-service/internal/platform/telemetry"
 	"github.com/stevians/wallet-service/internal/problem"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -195,12 +196,8 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 
 func (s *Server) withBodyLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/reconciliation/settlement-files" {
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			next.ServeHTTP(w, r)
-			return
-		}
-		if r.Body != nil {
+		// Settlement uploads enforce their own, larger limit in the handler.
+		if r.Body != nil && r.URL.Path != "/v1/reconciliation/settlement-files" {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -218,12 +215,12 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Request-ID")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 		}
-		
+
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -270,14 +267,10 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || parsed < 1 || parsed > 200 {
-			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
-			return
-		}
-		limit = parsed
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
 	}
 
 	cursor := r.URL.Query().Get("cursor")
@@ -324,14 +317,10 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || parsed < 1 || parsed > 200 {
-			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
-			return
-		}
-		limit = parsed
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
 	}
 
 	page, err := s.app.ListEntries(r.Context(), accountID, r.URL.Query().Get("cursor"), limit)
@@ -399,14 +388,10 @@ func (s *Server) handleGetTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListTransfers(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || parsed < 1 || parsed > 200 {
-			s.writeProblem(w, r, validationError("limit must be between 1 and 200"))
-			return
-		}
-		limit = parsed
+	limit, err := queryLimit(r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
 	}
 
 	cursor := r.URL.Query().Get("cursor")
@@ -573,6 +558,19 @@ func decodeJSON(body []byte, dst any) error {
 		return errors.New("request body must contain a single JSON object")
 	}
 	return nil
+}
+
+// queryLimit parses the optional ?limit= page size (1..200, default 50).
+func queryLimit(r *http.Request) (int, error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return pagination.DefaultLimit, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > pagination.MaxLimit {
+		return 0, validationError("limit must be between 1 and 200")
+	}
+	return limit, nil
 }
 
 func pathUUID(r *http.Request, name string) (uuid.UUID, error) {

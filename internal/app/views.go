@@ -1,13 +1,12 @@
 package app
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stevians/wallet-service/internal/ledger"
+	"github.com/stevians/wallet-service/internal/pagination"
 )
 
 type AccountView struct {
@@ -133,14 +132,6 @@ func entryView(entry ledger.Entry) EntryView {
 	}
 }
 
-func entryViews(entries []ledger.Entry) []EntryView {
-	views := make([]EntryView, 0, len(entries))
-	for _, entry := range entries {
-		views = append(views, entryView(entry))
-	}
-	return views
-}
-
 func transferView(transfer ledger.Transfer) TransferView {
 	metadata := transfer.Metadata
 	if len(metadata) == 0 {
@@ -165,33 +156,26 @@ func transferView(transfer ledger.Transfer) TransferView {
 func transferDetailView(detail ledger.TransferDetail) TransferDetailView {
 	return TransferDetailView{
 		TransferView: transferView(detail.Transfer),
-		Entries:      entryViews(detail.Entries),
+		Entries:      mapSlice(detail.Entries, entryView),
 	}
 }
 
 func integrityView(report ledger.IntegrityReport) IntegrityView {
-	drift := make([]BalanceDriftView, 0, len(report.BalanceDrift))
-	for _, item := range report.BalanceDrift {
-		drift = append(drift, BalanceDriftView{
+	drift := mapSlice(report.BalanceDrift, func(item ledger.BalanceDrift) BalanceDriftView {
+		return BalanceDriftView{
 			AccountID:     item.AccountID,
 			CachedPosted:  item.CachedPosted,
 			DerivedPosted: item.DerivedPosted,
-		})
-	}
-
-	unbalanced := make([]UnbalancedTransferView, 0, len(report.UnbalancedTransfers))
-	for _, item := range report.UnbalancedTransfers {
-		unbalanced = append(unbalanced, UnbalancedTransferView{
+		}
+	})
+	unbalanced := mapSlice(report.UnbalancedTransfers, func(item ledger.UnbalancedTransfer) UnbalancedTransferView {
+		return UnbalancedTransferView{
 			TransferID:  item.TransferID,
 			TotalDebit:  item.TotalDebit,
 			TotalCredit: item.TotalCredit,
-		})
-	}
-
-	missing := append([]uuid.UUID(nil), report.PostedWithoutEntries...)
-	if missing == nil {
-		missing = []uuid.UUID{}
-	}
+		}
+	})
+	missing := append([]uuid.UUID{}, report.PostedWithoutEntries...)
 
 	return IntegrityView{
 		OK:                   len(drift) == 0 && len(unbalanced) == 0 && len(missing) == 0,
@@ -202,23 +186,22 @@ func integrityView(report ledger.IntegrityReport) IntegrityView {
 	}
 }
 
-func encodeCursor(id int64) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
-}
-
-func decodeCursor(cursor string) (*int64, error) {
-	if cursor == "" {
-		return nil, nil
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+func decodeEntryCursor(cursor string) (*int64, error) {
+	id, err := pagination.DecodeInt64(cursor)
 	if err != nil {
 		return nil, validationError("invalid cursor")
 	}
-	id, err := strconv.ParseInt(string(raw), 10, 64)
-	if err != nil || id <= 0 {
-		return nil, validationError("invalid cursor")
+	return id, nil
+}
+
+// mapSlice converts domain values to views. It always returns a non-nil slice
+// so empty pages encode as [] rather than null.
+func mapSlice[T, V any](items []T, view func(T) V) []V {
+	views := make([]V, 0, len(items))
+	for _, item := range items {
+		views = append(views, view(item))
 	}
-	return &id, nil
+	return views
 }
 
 type HoldView struct {

@@ -14,20 +14,12 @@ func insertOutboxEvent(ctx context.Context, tx pgx.Tx, aggregateType string, agg
 	if err != nil {
 		return err
 	}
-	headersJSON, err := json.Marshal(map[string]string{
-		"event_id":       uuid.NewString(),
-		"schema_version": "1",
-	})
-	if err != nil {
-		return err
-	}
-
 	headers := map[string]string{
 		"event_id":       uuid.NewString(),
 		"schema_version": "1",
 	}
 	telemetry.InjectTrace(ctx, headers)
-	headersJSON, err = json.Marshal(headers)
+	headersJSON, err := json.Marshal(headers)
 	if err != nil {
 		return err
 	}
