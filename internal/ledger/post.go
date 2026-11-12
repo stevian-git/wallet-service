@@ -1,13 +1,14 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +28,13 @@ type lockedAccount struct {
 	AllowNegative bool
 }
 
+func (a lockedAccount) requireActive(accountID uuid.UUID) error {
+	if a.Status != accountStatusActive {
+		return fmt.Errorf("%w: account %s has status %s", ErrAccountFrozen, accountID, a.Status)
+	}
+	return nil
+}
+
 func (l *Ledger) Post(ctx context.Context, tx pgx.Tx, req PostingRequest) (Transfer, error) {
 	if err := validatePosting(req); err != nil {
 		return Transfer{}, err
@@ -39,9 +47,9 @@ func (l *Ledger) Post(ctx context.Context, tx pgx.Tx, req PostingRequest) (Trans
 	for _, entry := range req.Entries {
 		accountIDs = append(accountIDs, entry.AccountID)
 	}
-	sort.Slice(accountIDs, func(i, j int) bool {
-		return accountIDs[i].String() < accountIDs[j].String()
-	})
+	// Byte order matches PostgreSQL's uuid ordering (memcmp), so this is the
+	// same order lockAccounts' ORDER BY acquires the row locks in.
+	slices.SortFunc(accountIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 
 	lockStart := time.Now()
 	accounts, err := lockAccounts(ctx, tx, accountIDs)
@@ -59,8 +67,8 @@ func (l *Ledger) Post(ctx context.Context, tx pgx.Tx, req PostingRequest) (Trans
 		if account.Currency != req.Currency {
 			return Transfer{}, ErrCurrencyMismatch
 		}
-		if account.Status != "active" {
-			return Transfer{}, fmt.Errorf("%w: account %s has status %s", ErrAccountFrozen, entry.AccountID, account.Status)
+		if err := account.requireActive(entry.AccountID); err != nil {
+			return Transfer{}, err
 		}
 
 		delta := entry.Amount
@@ -108,8 +116,12 @@ func (l *Ledger) Post(ctx context.Context, tx pgx.Tx, req PostingRequest) (Trans
 		return Transfer{}, mapWriteError(err)
 	}
 
+	// Entries and balance updates are pipelined in one round trip: the
+	// account_balances rows are locked until commit, so every saved round trip
+	// shortens the critical section for hot accounts.
+	batch := &pgx.Batch{}
 	for _, entry := range req.Entries {
-		_, err = tx.Exec(ctx, `
+		batch.Queue(`
 			INSERT INTO ledger_entries (
 				transfer_id, account_id, currency, direction, amount, balance_after
 			) VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -120,23 +132,16 @@ func (l *Ledger) Post(ctx context.Context, tx pgx.Tx, req PostingRequest) (Trans
 			entry.Amount,
 			postedAfter[entry.AccountID],
 		)
-		if err != nil {
-			return Transfer{}, mapWriteError(err)
-		}
-
-		tag, err := tx.Exec(ctx, `
+		batch.Queue(`
 			UPDATE account_balances
 			   SET posted = $2, version = version + 1, updated_at = now()
 			 WHERE account_id = $1`,
 			toPgUUID(entry.AccountID),
 			postedAfter[entry.AccountID],
 		)
-		if err != nil {
-			return Transfer{}, mapWriteError(err)
-		}
-		if tag.RowsAffected() != 1 {
-			return Transfer{}, ErrNotFound
-		}
+	}
+	if err := execPostingBatch(ctx, tx, batch); err != nil {
+		return Transfer{}, err
 	}
 
 	if err := insertTransferEvent(ctx, tx, transferID, req); err != nil {
@@ -158,6 +163,30 @@ func (l *Ledger) Post(ctx context.Context, tx pgx.Tx, req PostingRequest) (Trans
 		CreatedAt:            createdAt,
 		PostedAt:             &postedAt,
 	}, nil
+}
+
+// execPostingBatch runs the queued (INSERT entry, UPDATE balance) pairs and
+// requires every balance UPDATE to hit exactly one row.
+func execPostingBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch) (err error) {
+	results := tx.SendBatch(ctx, batch)
+	defer func() {
+		if closeErr := results.Close(); err == nil && closeErr != nil {
+			err = mapWriteError(closeErr)
+		}
+	}()
+	for i := 0; i < batch.Len(); i += 2 {
+		if _, err := results.Exec(); err != nil {
+			return mapWriteError(err)
+		}
+		tag, err := results.Exec()
+		if err != nil {
+			return mapWriteError(err)
+		}
+		if tag.RowsAffected() != 1 {
+			return ErrNotFound
+		}
+	}
+	return nil
 }
 
 func insertTransferEvent(ctx context.Context, tx pgx.Tx, transferID uuid.UUID, req PostingRequest) error {
@@ -274,25 +303,16 @@ func lockAccounts(ctx context.Context, tx pgx.Tx, accountIDs []uuid.UUID) (map[u
 	result := make(map[uuid.UUID]lockedAccount, len(accountIDs))
 	for rows.Next() {
 		var (
-			id            pgtype.UUID
-			currency      string
-			status        string
-			normalSide    string
-			posted        int64
-			held          int64
-			allowNegative bool
+			id         pgtype.UUID
+			account    lockedAccount
+			normalSide string
 		)
-		if err := rows.Scan(&id, &currency, &status, &normalSide, &posted, &held, &allowNegative); err != nil {
+		if err := rows.Scan(&id, &account.Currency, &account.Status, &normalSide,
+			&account.Posted, &account.Held, &account.AllowNegative); err != nil {
 			return nil, err
 		}
-		result[uuidFromPg(id)] = lockedAccount{
-			Currency:      currency,
-			Status:        status,
-			NormalSide:    NormalSide(normalSide),
-			Posted:        posted,
-			Held:          held,
-			AllowNegative: allowNegative,
-		}
+		account.NormalSide = NormalSide(normalSide)
+		result[uuidFromPg(id)] = account
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

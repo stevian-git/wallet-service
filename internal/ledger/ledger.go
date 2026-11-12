@@ -1,10 +1,15 @@
 package ledger
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// accountStatusActive is the only status that may post or hold funds.
+const accountStatusActive = "active"
 
 type Ledger struct {
 	pool *pgxpool.Pool
@@ -42,4 +47,12 @@ func textPtrFromPg(value pgtype.Text) *string {
 		return nil
 	}
 	return &value.String
+}
+
+func timePtrFromPg(value pgtype.Timestamptz) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	t := value.Time
+	return &t
 }

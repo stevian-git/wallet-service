@@ -27,3 +27,15 @@ func TestDedupeTTLAndCap(t *testing.T) {
 		t.Fatalf("dedupe len = %d, want cap 2", got)
 	}
 }
+
+func TestDedupeCapEvictsOldestSighting(t *testing.T) {
+	dedupe := NewDedupe(time.Hour, 2)
+	dedupe.Add("a")
+	dedupe.Add("b")
+	dedupe.Add("a") // refreshes a; b is now the oldest
+	dedupe.Add("c")
+	if !dedupe.Seen("a") || dedupe.Seen("b") || !dedupe.Seen("c") {
+		t.Fatalf("want {a,c} kept and b evicted; a=%v b=%v c=%v",
+			dedupe.Seen("a"), dedupe.Seen("b"), dedupe.Seen("c"))
+	}
+}

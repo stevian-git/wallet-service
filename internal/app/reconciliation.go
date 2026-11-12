@@ -2,8 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
-	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +19,7 @@ func (s *Service) ImportSettlementFile(ctx context.Context, provider, fileName s
 		return SettlementFileView{}, validationError("file is required")
 	}
 
-	parsedDate, err := time.Parse("2006-01-02", settlementDate)
+	parsedDate, err := time.Parse(dateLayout, settlementDate)
 	if err != nil {
 		return SettlementFileView{}, validationError("settlement_date must be YYYY-MM-DD format")
 	}
@@ -33,20 +31,9 @@ func (s *Service) ImportSettlementFile(ctx context.Context, provider, fileName s
 		SettlementDate: parsedDate,
 	})
 	if err != nil {
-		if errors.Is(err, reconciliation.ErrDuplicateFile) {
-			return SettlementFileView{}, &duplicateFileError{}
-		}
 		return SettlementFileView{}, err
 	}
-
-	return SettlementFileView{
-		ID:             file.ID,
-		Provider:       file.Provider,
-		FileName:       file.FileName,
-		SettlementDate: file.SettlementDate.Format("2006-01-02"),
-		RecordCount:    file.RecordCount,
-		ImportedAt:     file.ImportedAt,
-	}, nil
+	return settlementFileView(file), nil
 }
 
 func (s *Service) CreateReconciliationRun(ctx context.Context, fileID uuid.UUID) (ReconciliationRunView, error) {
@@ -66,13 +53,6 @@ func (s *Service) GetReconciliationRun(ctx context.Context, runID uuid.UUID) (Re
 }
 
 func (s *Service) ListReconciliationRuns(ctx context.Context, cursor string, limit int) (ReconciliationRunsPageView, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
 	page, err := s.recon.ListRuns(ctx, reconciliation.ListRunsInput{
 		Cursor: cursor,
 		Limit:  limit,
@@ -81,28 +61,13 @@ func (s *Service) ListReconciliationRuns(ctx context.Context, cursor string, lim
 		return ReconciliationRunsPageView{}, err
 	}
 
-	views := make([]ReconciliationRunView, 0, len(page.Data))
-	for _, run := range page.Data {
-		views = append(views, reconciliationRunView(run))
-	}
-	if views == nil {
-		views = []ReconciliationRunView{}
-	}
-
 	return ReconciliationRunsPageView{
-		Data:       views,
+		Data:       mapSlice(page.Data, reconciliationRunView),
 		NextCursor: page.NextCursor,
 	}, nil
 }
 
 func (s *Service) ListSettlementFiles(ctx context.Context, cursor string, limit int) (SettlementFilesPageView, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
 	page, err := s.recon.ListSettlementFiles(ctx, reconciliation.ListSettlementFilesInput{
 		Cursor: cursor,
 		Limit:  limit,
@@ -111,28 +76,13 @@ func (s *Service) ListSettlementFiles(ctx context.Context, cursor string, limit 
 		return SettlementFilesPageView{}, err
 	}
 
-	views := make([]SettlementFileView, 0, len(page.Data))
-	for _, file := range page.Data {
-		views = append(views, settlementFileView(file))
-	}
-	if views == nil {
-		views = []SettlementFileView{}
-	}
-
 	return SettlementFilesPageView{
-		Data:       views,
+		Data:       mapSlice(page.Data, settlementFileView),
 		NextCursor: page.NextCursor,
 	}, nil
 }
 
 func (s *Service) ListDiscrepancies(ctx context.Context, runID uuid.UUID, resolution *string, cursor string, limit int) (DiscrepanciesPageView, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
 	page, err := s.recon.ListDiscrepancies(ctx, reconciliation.ListDiscrepanciesInput{
 		RunID:      runID,
 		Resolution: resolution,
@@ -143,19 +93,14 @@ func (s *Service) ListDiscrepancies(ctx context.Context, runID uuid.UUID, resolu
 		return DiscrepanciesPageView{}, err
 	}
 
-	views := make([]DiscrepancyView, 0, len(page.Data))
-	for _, d := range page.Data {
-		views = append(views, discrepancyView(d))
-	}
-	if views == nil {
-		views = []DiscrepancyView{}
-	}
-
 	return DiscrepanciesPageView{
-		Data:       views,
+		Data:       mapSlice(page.Data, discrepancyView),
 		NextCursor: page.NextCursor,
 	}, nil
 }
+
+// dateLayout is the settlement_date wire format (YYYY-MM-DD).
+const dateLayout = "2006-01-02"
 
 func reconciliationRunView(run reconciliation.ReconciliationRun) ReconciliationRunView {
 	return ReconciliationRunView{
@@ -190,18 +135,8 @@ func settlementFileView(f reconciliation.SettlementFile) SettlementFileView {
 		ID:             f.ID,
 		Provider:       f.Provider,
 		FileName:       f.FileName,
-		SettlementDate: f.SettlementDate.Format("2006-01-02"),
+		SettlementDate: f.SettlementDate.Format(dateLayout),
 		RecordCount:    f.RecordCount,
 		ImportedAt:     f.ImportedAt,
 	}
-}
-
-type duplicateFileError struct{}
-
-func (e *duplicateFileError) Error() string {
-	return "settlement file with same sha256 already exists"
-}
-
-func (e *duplicateFileError) StatusCode() int {
-	return http.StatusConflict
 }

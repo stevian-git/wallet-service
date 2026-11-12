@@ -104,154 +104,144 @@ func (s *Service) Do(ctx context.Context, req Request, work Work, mapError Error
 
 func (s *Service) reserve(ctx context.Context, req Request, hash []byte) (time.Time, *Outcome, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		tx, err := s.pool.Begin(ctx)
-		if err != nil {
-			return time.Time{}, nil, err
-		}
-
-		leaseUntil := time.Now().UTC().Add(s.leaseFor(req))
-		var storedLease time.Time
-		err = tx.QueryRow(ctx, `
-			INSERT INTO idempotency_keys (scope, key, request_hash, status, locked_until)
-			VALUES ($1, $2, $3, 'in_progress', $4)
-			ON CONFLICT (scope, key) DO NOTHING
-			RETURNING locked_until`,
-			req.Scope, req.Key, hash, leaseUntil,
-		).Scan(&storedLease)
-		if err == nil {
-			if err := tx.Commit(ctx); err != nil {
-				return time.Time{}, nil, err
-			}
-			return storedLease, nil, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			tx.Rollback(ctx)
-			return time.Time{}, nil, err
-		}
-
-		var (
-			existingHash []byte
-			status       string
-			responseCode pgtype.Int4
-			responseBody []byte
-			lockedUntil  pgtype.Timestamptz
-			expiresAt    time.Time
-		)
-		err = tx.QueryRow(ctx, `
-			SELECT request_hash, status, response_code, response_body, locked_until, expires_at
-			  FROM idempotency_keys
-			 WHERE scope = $1 AND key = $2
-			   FOR UPDATE`,
-			req.Scope, req.Key,
-		).Scan(&existingHash, &status, &responseCode, &responseBody, &lockedUntil, &expiresAt)
-		if errors.Is(err, pgx.ErrNoRows) {
-			tx.Rollback(ctx)
+		leaseUntil, replay, retry, err := s.reserveOnce(ctx, req, hash)
+		if retry {
 			continue
 		}
-		if err != nil {
-			tx.Rollback(ctx)
-			return time.Time{}, nil, err
-		}
-
-		now := time.Now().UTC()
-		if !expiresAt.After(now) {
-			if _, err := tx.Exec(ctx, `DELETE FROM idempotency_keys WHERE scope = $1 AND key = $2`, req.Scope, req.Key); err != nil {
-				tx.Rollback(ctx)
-				return time.Time{}, nil, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return time.Time{}, nil, err
-			}
-			continue
-		}
-
-		if !bytes.Equal(existingHash, hash) {
-			tx.Rollback(ctx)
-			return time.Time{}, nil, ErrKeyReused
-		}
-
-		switch status {
-		case "completed":
-			if !responseCode.Valid || responseBody == nil {
-				tx.Rollback(ctx)
-				return time.Time{}, nil, fmt.Errorf("idempotency: completed key has no response")
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return time.Time{}, nil, err
-			}
-			return time.Time{}, &Outcome{
-				Response: Response{StatusCode: int(responseCode.Int32), Body: cloneBytes(responseBody)},
-				Replayed: true,
-			}, nil
-
-		case "in_progress":
-			if lockedUntil.Valid && lockedUntil.Time.After(now) {
-				tx.Rollback(ctx)
-				return time.Time{}, nil, ErrInProgress
-			}
-
-			takeoverLease := time.Now().UTC().Add(s.leaseFor(req))
-			var stored time.Time
-			err := tx.QueryRow(ctx, `
-				UPDATE idempotency_keys
-				   SET locked_until = $3
-				 WHERE scope = $1 AND key = $2
-				   AND status = 'in_progress'
-				   AND (locked_until IS NULL OR locked_until <= now())
-				RETURNING locked_until`,
-				req.Scope, req.Key, takeoverLease,
-			).Scan(&stored)
-			if errors.Is(err, pgx.ErrNoRows) {
-				tx.Rollback(ctx)
-				return time.Time{}, nil, ErrInProgress
-			}
-			if err != nil {
-				tx.Rollback(ctx)
-				return time.Time{}, nil, err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return time.Time{}, nil, err
-			}
-			return stored, nil, nil
-
-		default:
-			tx.Rollback(ctx)
-			return time.Time{}, nil, fmt.Errorf("idempotency: unknown status %q", status)
-		}
+		return leaseUntil, replay, err
 	}
-
 	return time.Time{}, nil, fmt.Errorf("idempotency: could not reserve key after retries")
 }
 
-func (s *Service) run(ctx context.Context, req Request, leaseUntil time.Time, work Work) (Outcome, error) {
+// reserveOnce makes one attempt to claim the key in its own transaction.
+// retry=true means the row vanished or was expired and deleted between our
+// statements, so the caller should start over.
+func (s *Service) reserveOnce(ctx context.Context, req Request, hash []byte) (leaseUntil time.Time, replay *Outcome, retry bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return Outcome{}, err
+		return time.Time{}, nil, false, err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) // no-op after Commit
 
-	response, err := work(ctx, tx)
-	if err != nil {
-		return Outcome{}, err
+	var storedLease time.Time
+	err = tx.QueryRow(ctx, `
+		INSERT INTO idempotency_keys (scope, key, request_hash, status, locked_until)
+		VALUES ($1, $2, $3, 'in_progress', $4)
+		ON CONFLICT (scope, key) DO NOTHING
+		RETURNING locked_until`,
+		req.Scope, req.Key, hash, time.Now().UTC().Add(s.leaseFor(req)),
+	).Scan(&storedLease)
+	if err == nil {
+		return storedLease, nil, false, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil, false, err
 	}
 
-	body, err := completeInTx(ctx, tx, req, leaseUntil, response)
+	var (
+		existingHash []byte
+		status       string
+		responseCode pgtype.Int4
+		responseBody []byte
+		lockedUntil  pgtype.Timestamptz
+		expiresAt    time.Time
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT request_hash, status, response_code, response_body, locked_until, expires_at
+		  FROM idempotency_keys
+		 WHERE scope = $1 AND key = $2
+		   FOR UPDATE`,
+		req.Scope, req.Key,
+	).Scan(&existingHash, &status, &responseCode, &responseBody, &lockedUntil, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil, true, nil
+	}
 	if err != nil {
-		return Outcome{}, err
+		return time.Time{}, nil, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Outcome{}, err
+
+	now := time.Now().UTC()
+	if !expiresAt.After(now) {
+		if _, err := tx.Exec(ctx, `DELETE FROM idempotency_keys WHERE scope = $1 AND key = $2`, req.Scope, req.Key); err != nil {
+			return time.Time{}, nil, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return time.Time{}, nil, false, err
+		}
+		return time.Time{}, nil, true, nil
 	}
-	return Outcome{Response: Response{StatusCode: response.StatusCode, Body: body}}, nil
+
+	if !bytes.Equal(existingHash, hash) {
+		return time.Time{}, nil, false, ErrKeyReused
+	}
+
+	switch status {
+	case "completed":
+		if !responseCode.Valid || responseBody == nil {
+			return time.Time{}, nil, false, fmt.Errorf("idempotency: completed key has no response")
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return time.Time{}, nil, false, err
+		}
+		return time.Time{}, &Outcome{
+			Response: Response{StatusCode: int(responseCode.Int32), Body: cloneBytes(responseBody)},
+			Replayed: true,
+		}, false, nil
+
+	case "in_progress":
+		if lockedUntil.Valid && lockedUntil.Time.After(now) {
+			return time.Time{}, nil, false, ErrInProgress
+		}
+		// The previous holder's lease expired (crash or timeout): take it over.
+		var stored time.Time
+		err := tx.QueryRow(ctx, `
+			UPDATE idempotency_keys
+			   SET locked_until = $3
+			 WHERE scope = $1 AND key = $2
+			   AND status = 'in_progress'
+			   AND (locked_until IS NULL OR locked_until <= now())
+			RETURNING locked_until`,
+			req.Scope, req.Key, time.Now().UTC().Add(s.leaseFor(req)),
+		).Scan(&stored)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return time.Time{}, nil, false, ErrInProgress
+		}
+		if err != nil {
+			return time.Time{}, nil, false, err
+		}
+		return stored, nil, false, tx.Commit(ctx)
+
+	default:
+		return time.Time{}, nil, false, fmt.Errorf("idempotency: unknown status %q", status)
+	}
 }
 
+func (s *Service) run(ctx context.Context, req Request, leaseUntil time.Time, work Work) (Outcome, error) {
+	return s.inTx(ctx, req, leaseUntil, func(tx pgx.Tx) (Response, error) {
+		return work(ctx, tx)
+	})
+}
+
+// completeError stores a stable error response so retries replay it.
 func (s *Service) completeError(ctx context.Context, req Request, leaseUntil time.Time, response Response) (Outcome, error) {
+	return s.inTx(ctx, req, leaseUntil, func(pgx.Tx) (Response, error) {
+		return response, nil
+	})
+}
+
+// inTx produces a response and marks the key completed in the same
+// transaction, so the stored response and the business write commit together.
+func (s *Service) inTx(ctx context.Context, req Request, leaseUntil time.Time, produce func(pgx.Tx) (Response, error)) (Outcome, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Outcome{}, err
 	}
 	defer tx.Rollback(ctx)
 
+	response, err := produce(tx)
+	if err != nil {
+		return Outcome{}, err
+	}
 	body, err := completeInTx(ctx, tx, req, leaseUntil, response)
 	if err != nil {
 		return Outcome{}, err

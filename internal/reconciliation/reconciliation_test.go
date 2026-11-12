@@ -2,6 +2,7 @@ package reconciliation
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -197,5 +198,94 @@ func TestCompareStatusMismatch(t *testing.T) {
 	}
 	if !foundStatus {
 		t.Error("expected status_mismatch discrepancy")
+	}
+}
+
+func TestServiceRunsAndPagination(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+
+	if _, err := svc.CreateRun(ctx, CreateRunInput{FileID: uuid.New()}); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("create run for unknown file: err = %v, want ErrFileNotFound", err)
+	}
+	if _, err := svc.GetRun(ctx, uuid.New()); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("get unknown run: err = %v, want ErrRunNotFound", err)
+	}
+
+	csv := `provider_ref,our_reference,amount,currency,status,occurred_at
+prov-1,ref-a,100,IDR,success,2026-10-26T10:00:00Z
+prov-2,ref-b,200,IDR,success,2026-10-26T10:00:00Z
+prov-3,ref-c,300,IDR,success,2026-10-26T10:00:00Z
+`
+	file, err := svc.Import(ctx, ImportInput{
+		Provider: "p", FileName: "f.csv", FileContent: []byte(csv),
+		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	var runIDs []uuid.UUID
+	for i := 0; i < 3; i++ {
+		run, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID})
+		if err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+		if run.Status != RunStatusRunning || run.FileID != file.ID {
+			t.Fatalf("created run = %+v", run)
+		}
+		runIDs = append(runIDs, run.ID)
+	}
+
+	first, err := svc.ListRuns(ctx, ListRunsInput{Limit: 2})
+	if err != nil || len(first.Data) != 2 || first.NextCursor == nil {
+		t.Fatalf("runs page 1: len=%d cursor=%v err=%v", len(first.Data), first.NextCursor, err)
+	}
+	second, err := svc.ListRuns(ctx, ListRunsInput{Limit: 2, Cursor: *first.NextCursor})
+	if err != nil || len(second.Data) != 1 || second.NextCursor != nil {
+		t.Fatalf("runs page 2: len=%d cursor=%v err=%v", len(second.Data), second.NextCursor, err)
+	}
+	if !(first.Data[0].ID.String() > first.Data[1].ID.String() && first.Data[1].ID.String() > second.Data[0].ID.String()) {
+		t.Fatal("runs are not ordered by id DESC across pages")
+	}
+
+	files, err := svc.ListSettlementFiles(ctx, ListSettlementFilesInput{})
+	if err != nil || len(files.Data) != 1 || files.NextCursor != nil || files.Data[0].RecordCount != 3 {
+		t.Fatalf("files: %+v err=%v", files, err)
+	}
+
+	// With no transfers in scope every record is missing_in_ledger.
+	run, err := svc.GetRun(ctx, runIDs[0])
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if err := svc.Reconciler().Execute(ctx, run); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	run, err = svc.GetRun(ctx, runIDs[0])
+	if err != nil || run.Status != RunStatusCompleted || run.DiscrepancyCount != 3 {
+		t.Fatalf("executed run = %+v err=%v", run, err)
+	}
+
+	page1, err := svc.ListDiscrepancies(ctx, ListDiscrepanciesInput{RunID: run.ID, Limit: 2})
+	if err != nil || len(page1.Data) != 2 || page1.NextCursor == nil {
+		t.Fatalf("discrepancies page 1: len=%d cursor=%v err=%v", len(page1.Data), page1.NextCursor, err)
+	}
+	page2, err := svc.ListDiscrepancies(ctx, ListDiscrepanciesInput{RunID: run.ID, Limit: 2, Cursor: *page1.NextCursor})
+	if err != nil || len(page2.Data) != 1 || page2.NextCursor != nil || page2.Data[0].ID <= page1.Data[1].ID {
+		t.Fatalf("discrepancies page 2: %+v err=%v", page2, err)
+	}
+
+	open, resolved := "open", "resolved"
+	if got, err := svc.ListDiscrepancies(ctx, ListDiscrepanciesInput{RunID: run.ID, Resolution: &open}); err != nil || len(got.Data) != 3 {
+		t.Fatalf("open filter: len=%d err=%v", len(got.Data), err)
+	}
+	if got, err := svc.ListDiscrepancies(ctx, ListDiscrepanciesInput{RunID: run.ID, Resolution: &resolved}); err != nil || len(got.Data) != 0 || got.Data == nil {
+		t.Fatalf("resolved filter: %+v err=%v", got, err)
+	}
+
+	if _, err := svc.ListDiscrepancies(ctx, ListDiscrepanciesInput{RunID: run.ID, Cursor: "!!"}); err == nil || err.Error() != "invalid cursor" {
+		t.Fatalf("bad cursor: err = %v", err)
 	}
 }

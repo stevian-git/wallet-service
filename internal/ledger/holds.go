@@ -18,6 +18,13 @@ const (
 	maxHoldTTLSeconds = 7 * 24 * 60 * 60
 )
 
+func (h Hold) requireActive() error {
+	if h.Status != HoldStatusActive {
+		return fmt.Errorf("%w: hold status is %s", ErrHoldNotActive, h.Status)
+	}
+	return nil
+}
+
 func (l *Ledger) CreateHold(ctx context.Context, tx pgx.Tx, input CreateHoldInput) (Hold, error) {
 	if tx == nil {
 		return Hold{}, ErrNoTransaction
@@ -25,11 +32,8 @@ func (l *Ledger) CreateHold(ctx context.Context, tx pgx.Tx, input CreateHoldInpu
 	if input.AccountID == uuid.Nil {
 		return Hold{}, fmt.Errorf("%w: account_id is required", ErrInvalidPosting)
 	}
-	if input.Amount <= 0 {
-		return Hold{}, ErrInvalidAmount
-	}
-	if !validCurrency(input.Currency) {
-		return Hold{}, fmt.Errorf("%w: invalid currency %q", ErrInvalidPosting, input.Currency)
+	if err := validateAmountAndCurrency(input.Amount, input.Currency); err != nil {
+		return Hold{}, err
 	}
 	if input.TTLSeconds < minHoldTTLSeconds || input.TTLSeconds > maxHoldTTLSeconds {
 		return Hold{}, fmt.Errorf("%w: ttl_seconds must be between %d and %d", ErrInvalidPosting, minHoldTTLSeconds, maxHoldTTLSeconds)
@@ -48,8 +52,8 @@ func (l *Ledger) CreateHold(ctx context.Context, tx pgx.Tx, input CreateHoldInpu
 	if account.Currency != input.Currency {
 		return Hold{}, ErrCurrencyMismatch
 	}
-	if account.Status != "active" {
-		return Hold{}, fmt.Errorf("%w: account %s has status %s", ErrAccountFrozen, input.AccountID, account.Status)
+	if err := account.requireActive(input.AccountID); err != nil {
+		return Hold{}, err
 	}
 	available, ok := addInt64(account.Posted, -account.Held)
 	if !ok {
@@ -67,51 +71,42 @@ func (l *Ledger) CreateHold(ctx context.Context, tx pgx.Tx, input CreateHoldInpu
 	}
 
 	var (
-		id        pgtype.UUID
-		status    string
-		expiresAt time.Time
-		createdAt time.Time
+		id     pgtype.UUID
+		status string
 	)
+	hold := Hold{
+		AccountID: input.AccountID,
+		Amount:    input.Amount,
+		Currency:  input.Currency,
+		Reference: input.Reference,
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO holds (account_id, amount, currency, status, reference, expires_at)
 		VALUES ($1, $2, $3, 'active', $4, now() + ($5 * interval '1 second'))
 		RETURNING id, status::text, expires_at, created_at`,
 		toPgUUID(input.AccountID), input.Amount, input.Currency, textPtrToPg(input.Reference), input.TTLSeconds,
-	).Scan(&id, &status, &expiresAt, &createdAt)
+	).Scan(&id, &status, &hold.ExpiresAt, &hold.CreatedAt)
 	if err != nil {
 		return Hold{}, mapWriteError(err)
 	}
+	hold.ID = uuidFromPg(id)
+	hold.Status = HoldStatus(status)
 
-	hold := Hold{
-		ID:        uuidFromPg(id),
-		AccountID: input.AccountID,
-		Amount:    input.Amount,
-		Currency:  input.Currency,
-		Status:    HoldStatus(status),
-		Reference: input.Reference,
-		ExpiresAt: expiresAt,
-		CreatedAt: createdAt,
-	}
-
-	payload := map[string]any{
+	if err := insertOutboxEvent(ctx, tx, "hold", hold.ID, "hold.created", map[string]any{
 		"hold_id":    hold.ID,
 		"account_id": hold.AccountID,
 		"amount":     hold.Amount,
 		"currency":   hold.Currency,
 		"expires_at": hold.ExpiresAt,
-	}
-	if err := insertOutboxEvent(ctx, tx, "hold", hold.ID, "hold.created", payload); err != nil {
+	}); err != nil {
 		return Hold{}, mapWriteError(err)
 	}
 	return hold, nil
 }
 
 func (l *Ledger) GetHold(ctx context.Context, holdID uuid.UUID) (Hold, error) {
-	return scanHold(l.pool.QueryRow(ctx, `
-		SELECT id, account_id, amount, currency, status::text, reference,
-		       expires_at, transfer_id, created_at, resolved_at
-		  FROM holds
-		 WHERE id = $1`, toPgUUID(holdID)))
+	return scanHold(l.pool.QueryRow(ctx,
+		`SELECT `+holdColumns+` FROM holds WHERE id = $1`, toPgUUID(holdID)))
 }
 
 func (l *Ledger) CaptureHold(ctx context.Context, tx pgx.Tx, input CaptureHoldInput) (Transfer, error) {
@@ -132,8 +127,8 @@ func (l *Ledger) CaptureHold(ctx context.Context, tx pgx.Tx, input CaptureHoldIn
 	if err != nil {
 		return Transfer{}, err
 	}
-	if hold.Status != HoldStatusActive {
-		return Transfer{}, fmt.Errorf("%w: hold status is %s", ErrHoldNotActive, hold.Status)
+	if err := hold.requireActive(); err != nil {
+		return Transfer{}, err
 	}
 	if !hold.ExpiresAt.After(time.Now().UTC()) {
 		return Transfer{}, ErrHoldExpired
@@ -142,6 +137,7 @@ func (l *Ledger) CaptureHold(ctx context.Context, tx pgx.Tx, input CaptureHoldIn
 		return Transfer{}, fmt.Errorf("%w: source and destination are the same account", ErrInvalidPosting)
 	}
 
+	// Amount 0 means "capture the full hold"; any remainder is released.
 	captureAmount := hold.Amount
 	if input.Amount != 0 {
 		captureAmount = input.Amount
@@ -158,10 +154,10 @@ func (l *Ledger) CaptureHold(ctx context.Context, tx pgx.Tx, input CaptureHoldIn
 	}
 	source := accounts[hold.AccountID]
 	if source.Held < hold.Amount {
-		return Transfer{}, fmt.Errorf("ledger inconsistency: hold %s exceeds held balance for account %s", hold.ID, hold.AccountID)
+		return Transfer{}, heldInconsistency(hold)
 	}
-	if source.Status != "active" {
-		return Transfer{}, fmt.Errorf("%w: account %s has status %s", ErrAccountFrozen, hold.AccountID, source.Status)
+	if err := source.requireActive(hold.AccountID); err != nil {
+		return Transfer{}, err
 	}
 	if err := changeHeld(ctx, tx, hold.AccountID, -hold.Amount); err != nil {
 		return Transfer{}, err
@@ -171,43 +167,20 @@ func (l *Ledger) CaptureHold(ctx context.Context, tx pgx.Tx, input CaptureHoldIn
 	if err != nil {
 		return Transfer{}, err
 	}
-
-	sourceAccountID := hold.AccountID
-	transfer, err := l.Post(ctx, tx, PostingRequest{
-		Type:                 TransferTypeHoldCapture,
-		SourceAccountID:      &sourceAccountID,
-		DestinationAccountID: &input.DestinationAccountID,
-		Amount:               captureAmount,
-		Currency:             hold.Currency,
-		Reference:            hold.Reference,
-		Metadata:             metadata,
-		Entries: []PostingEntry{
-			{AccountID: hold.AccountID, Currency: hold.Currency, Direction: DirectionDebit, Amount: captureAmount},
-			{AccountID: input.DestinationAccountID, Currency: hold.Currency, Direction: DirectionCredit, Amount: captureAmount},
-		},
-	})
+	transfer, err := l.Post(ctx, tx, simpleMovement(TransferTypeHoldCapture, hold.AccountID, input.DestinationAccountID,
+		captureAmount, hold.Currency, hold.Reference, metadata))
 	if err != nil {
 		return Transfer{}, err
 	}
 
-	var resolvedAt time.Time
-	err = tx.QueryRow(ctx, `
-		UPDATE holds
-		   SET status = 'captured', transfer_id = $2, resolved_at = now()
-		 WHERE id = $1
-		 RETURNING resolved_at`,
-		toPgUUID(hold.ID), toPgUUID(transfer.ID),
-	).Scan(&resolvedAt)
-	if err != nil {
-		return Transfer{}, mapWriteError(err)
+	if _, err := markHoldResolved(ctx, tx, hold.ID, HoldStatusCaptured, &transfer.ID); err != nil {
+		return Transfer{}, err
 	}
-
-	payload := map[string]any{
+	if err := insertOutboxEvent(ctx, tx, "hold", hold.ID, "hold.captured", map[string]any{
 		"hold_id":     hold.ID,
 		"transfer_id": transfer.ID,
 		"amount":      captureAmount,
-	}
-	if err := insertOutboxEvent(ctx, tx, "hold", hold.ID, "hold.captured", payload); err != nil {
+	}); err != nil {
 		return Transfer{}, mapWriteError(err)
 	}
 	return transfer, nil
@@ -221,30 +194,10 @@ func (l *Ledger) ReleaseHold(ctx context.Context, tx pgx.Tx, holdID uuid.UUID) (
 	if err != nil {
 		return Hold{}, err
 	}
-	if hold.Status != HoldStatusActive {
-		return Hold{}, fmt.Errorf("%w: hold status is %s", ErrHoldNotActive, hold.Status)
-	}
-	if err := releaseHeld(ctx, tx, hold); err != nil {
+	if err := hold.requireActive(); err != nil {
 		return Hold{}, err
 	}
-
-	var resolvedAt time.Time
-	err = tx.QueryRow(ctx, `
-		UPDATE holds
-		   SET status = 'released', resolved_at = now()
-		 WHERE id = $1
-		 RETURNING resolved_at`, toPgUUID(hold.ID),
-	).Scan(&resolvedAt)
-	if err != nil {
-		return Hold{}, mapWriteError(err)
-	}
-	hold.Status = HoldStatusReleased
-	hold.ResolvedAt = &resolvedAt
-
-	if err := insertOutboxEvent(ctx, tx, "hold", hold.ID, "hold.released", map[string]any{"hold_id": hold.ID}); err != nil {
-		return Hold{}, mapWriteError(err)
-	}
-	return hold, nil
+	return finishHold(ctx, tx, hold, HoldStatusReleased, "hold.released")
 }
 
 // ExpireOne finds and expires at most one due hold. It is safe to run from
@@ -266,28 +219,33 @@ func (l *Ledger) ExpireOne(ctx context.Context) (Hold, bool, error) {
 		 LIMIT 1
 		   FOR UPDATE SKIP LOCKED`,
 	).Scan(&holdID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		if err := tx.Commit(ctx); err != nil {
-			return Hold{}, false, err
-		}
-		return Hold{}, false, nil
-	}
-	if err != nil {
+
+	var (
+		hold    Hold
+		expired bool
+	)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Nothing due.
+	case err != nil:
 		return Hold{}, false, err
+	default:
+		hold, err = expireHoldLocked(ctx, tx, uuidFromPg(holdID))
+		switch {
+		case errors.Is(err, ErrHoldNotActive):
+			// Resolved concurrently between the claim and the lock; not an error.
+		case err != nil:
+			return Hold{}, false, err
+		default:
+			expired = true
+		}
 	}
 
-	hold, err := expireHoldLocked(ctx, tx, uuidFromPg(holdID))
-	if errors.Is(err, ErrHoldNotActive) {
-		if err := tx.Commit(ctx); err != nil {
-			return Hold{}, false, err
-		}
-		return Hold{}, false, nil
-	}
-	if err != nil {
-		return Hold{}, false, err
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return Hold{}, false, err
+	}
+	if !expired {
+		return Hold{}, false, nil
 	}
 	return hold, true, nil
 }
@@ -304,33 +262,50 @@ func expireHoldLocked(ctx context.Context, tx pgx.Tx, holdID uuid.UUID) (Hold, e
 	if err != nil {
 		return Hold{}, err
 	}
-	if hold.Status != HoldStatusActive {
-		return Hold{}, fmt.Errorf("%w: hold status is %s", ErrHoldNotActive, hold.Status)
+	if err := hold.requireActive(); err != nil {
+		return Hold{}, err
 	}
 	if hold.ExpiresAt.After(time.Now().UTC()) {
 		return Hold{}, ErrHoldNotActive
 	}
+	return finishHold(ctx, tx, hold, HoldStatusExpired, "hold.expired")
+}
+
+// finishHold returns the held amount to the account, records the terminal
+// status, and emits the matching event. Used by release and expiry; capture
+// moves money instead and has its own path.
+func finishHold(ctx context.Context, tx pgx.Tx, hold Hold, status HoldStatus, eventType string) (Hold, error) {
 	if err := releaseHeld(ctx, tx, hold); err != nil {
 		return Hold{}, err
 	}
-
-	var resolvedAt time.Time
-	err = tx.QueryRow(ctx, `
-		UPDATE holds
-		   SET status = 'expired', resolved_at = now()
-		 WHERE id = $1
-		 RETURNING resolved_at`, toPgUUID(hold.ID),
-	).Scan(&resolvedAt)
+	resolvedAt, err := markHoldResolved(ctx, tx, hold.ID, status, nil)
 	if err != nil {
-		return Hold{}, mapWriteError(err)
+		return Hold{}, err
 	}
-	hold.Status = HoldStatusExpired
+	hold.Status = status
 	hold.ResolvedAt = &resolvedAt
 
-	if err := insertOutboxEvent(ctx, tx, "hold", hold.ID, "hold.expired", map[string]any{"hold_id": hold.ID}); err != nil {
+	if err := insertOutboxEvent(ctx, tx, "hold", hold.ID, eventType, map[string]any{"hold_id": hold.ID}); err != nil {
 		return Hold{}, mapWriteError(err)
 	}
 	return hold, nil
+}
+
+func markHoldResolved(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, status HoldStatus, transferID *uuid.UUID) (time.Time, error) {
+	var resolvedAt time.Time
+	err := tx.QueryRow(ctx, `
+		UPDATE holds
+		   SET status = $2::hold_status,
+		       transfer_id = COALESCE($3, transfer_id),
+		       resolved_at = now()
+		 WHERE id = $1
+		 RETURNING resolved_at`,
+		toPgUUID(holdID), string(status), uuidPtrToPg(transferID),
+	).Scan(&resolvedAt)
+	if err != nil {
+		return time.Time{}, mapWriteError(err)
+	}
+	return resolvedAt, nil
 }
 
 func releaseHeld(ctx context.Context, tx pgx.Tx, hold Hold) error {
@@ -348,9 +323,13 @@ func releaseHeld(ctx context.Context, tx pgx.Tx, hold Hold) error {
 		return mapWriteError(err)
 	}
 	if currentlyHeld < hold.Amount {
-		return fmt.Errorf("ledger inconsistency: hold %s exceeds held balance for account %s", hold.ID, hold.AccountID)
+		return heldInconsistency(hold)
 	}
 	return changeHeld(ctx, tx, hold.AccountID, -hold.Amount)
+}
+
+func heldInconsistency(hold Hold) error {
+	return fmt.Errorf("ledger inconsistency: hold %s exceeds held balance for account %s", hold.ID, hold.AccountID)
 }
 
 func changeHeld(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, delta int64) error {
@@ -376,50 +355,6 @@ func changeHeld(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, delta int64
 }
 
 func lockHold(ctx context.Context, tx pgx.Tx, holdID uuid.UUID) (Hold, error) {
-	return scanHold(tx.QueryRow(ctx, `
-		SELECT id, account_id, amount, currency, status::text, reference,
-		       expires_at, transfer_id, created_at, resolved_at
-		  FROM holds
-		 WHERE id = $1
-		   FOR UPDATE`, toPgUUID(holdID)))
-}
-
-func scanHold(row pgx.Row) (Hold, error) {
-	var (
-		id         pgtype.UUID
-		accountID  pgtype.UUID
-		amount     int64
-		currency   string
-		status     string
-		reference  pgtype.Text
-		expiresAt  time.Time
-		transferID pgtype.UUID
-		createdAt  time.Time
-		resolvedAt pgtype.Timestamptz
-	)
-	err := row.Scan(&id, &accountID, &amount, &currency, &status, &reference,
-		&expiresAt, &transferID, &createdAt, &resolvedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Hold{}, ErrNotFound
-	}
-	if err != nil {
-		return Hold{}, err
-	}
-
-	hold := Hold{
-		ID:         uuidFromPg(id),
-		AccountID:  uuidFromPg(accountID),
-		Amount:     amount,
-		Currency:   currency,
-		Status:     HoldStatus(status),
-		Reference:  textPtrFromPg(reference),
-		ExpiresAt:  expiresAt,
-		TransferID: uuidPtrFromPg(transferID),
-		CreatedAt:  createdAt,
-	}
-	if resolvedAt.Valid {
-		value := resolvedAt.Time
-		hold.ResolvedAt = &value
-	}
-	return hold, nil
+	return scanHold(tx.QueryRow(ctx,
+		`SELECT `+holdColumns+` FROM holds WHERE id = $1 FOR UPDATE`, toPgUUID(holdID)))
 }

@@ -52,18 +52,12 @@ func (s *Service) CaptureHold(ctx context.Context, meta Meta, holdID uuid.UUID, 
 		return Result{}, validationError("amount must be positive")
 	}
 
-	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
-		transfer, err := s.book.CaptureHold(ctx, tx, ledger.CaptureHoldInput{
+	return s.postTransfer(ctx, meta, ledger.TransferTypeHoldCapture, func(ctx context.Context, tx pgx.Tx) (ledger.Transfer, error) {
+		return s.book.CaptureHold(ctx, tx, ledger.CaptureHoldInput{
 			HoldID:               holdID,
 			DestinationAccountID: req.DestinationAccountID,
 			Amount:               req.Amount,
 		})
-		if err != nil {
-			recordTransferOutcome(string(ledger.TransferTypeHoldCapture), err)
-			return idempotency.Response{}, err
-		}
-		recordTransferOutcome(string(ledger.TransferTypeHoldCapture), nil)
-		return jsonResponse(http.StatusCreated, transferView(transfer))
 	})
 }
 

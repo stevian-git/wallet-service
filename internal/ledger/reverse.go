@@ -3,9 +3,7 @@ package ledger
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,40 +18,13 @@ func (l *Ledger) Reverse(ctx context.Context, tx pgx.Tx, transferID uuid.UUID, r
 		return Transfer{}, fmt.Errorf("%w: reason must be at most 255 characters", ErrInvalidPosting)
 	}
 
-	var (
-		originalID           pgtype.UUID
-		transferType         string
-		status               string
-		amount               int64
-		currency             string
-		sourceAccountID      pgtype.UUID
-		destinationAccountID pgtype.UUID
-		reference            pgtype.Text
-		reversesTransferID   pgtype.UUID
-		metadata             []byte
-		createdAt            time.Time
-		postedAt             pgtype.Timestamptz
-	)
-	err := tx.QueryRow(ctx, `
-		SELECT id, type::text, status::text, amount, currency,
-		       source_account_id, destination_account_id, reference,
-		       reverses_transfer_id, metadata, created_at, posted_at
-		  FROM transfers
-		 WHERE id = $1
-		   FOR UPDATE`, toPgUUID(transferID),
-	).Scan(
-		&originalID, &transferType, &status, &amount, &currency,
-		&sourceAccountID, &destinationAccountID, &reference,
-		&reversesTransferID, &metadata, &createdAt, &postedAt,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Transfer{}, ErrNotFound
-	}
+	original, err := scanTransfer(tx.QueryRow(ctx,
+		`SELECT `+transferColumns+` FROM transfers WHERE id = $1 FOR UPDATE`, toPgUUID(transferID)))
 	if err != nil {
 		return Transfer{}, err
 	}
-	if status != string(TransferStatusPosted) {
-		return Transfer{}, fmt.Errorf("%w: transfer status is %s", ErrInvalidPosting, status)
+	if original.Status != TransferStatusPosted {
+		return Transfer{}, fmt.Errorf("%w: transfer status is %s", ErrInvalidPosting, original.Status)
 	}
 
 	var alreadyReversed bool
@@ -72,31 +43,20 @@ func (l *Ledger) Reverse(ctx context.Context, tx pgx.Tx, transferID uuid.UUID, r
 	if err != nil {
 		return Transfer{}, err
 	}
-	defer rows.Close()
-
-	entries := make([]PostingEntry, 0, 2)
-	for rows.Next() {
+	entries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (PostingEntry, error) {
 		var (
 			accountID pgtype.UUID
-			entryCur  string
+			entry     PostingEntry
 			direction string
-			entryAmt  int64
 		)
-		if err := rows.Scan(&accountID, &entryCur, &direction, &entryAmt); err != nil {
-			return Transfer{}, err
+		if err := row.Scan(&accountID, &entry.Currency, &direction, &entry.Amount); err != nil {
+			return PostingEntry{}, err
 		}
-		inverted := DirectionCredit
-		if Direction(direction) == DirectionCredit {
-			inverted = DirectionDebit
-		}
-		entries = append(entries, PostingEntry{
-			AccountID: uuidFromPg(accountID),
-			Currency:  entryCur,
-			Direction: inverted,
-			Amount:    entryAmt,
-		})
-	}
-	if err := rows.Err(); err != nil {
+		entry.AccountID = uuidFromPg(accountID)
+		entry.Direction = Direction(direction).opposite()
+		return entry, nil
+	})
+	if err != nil {
 		return Transfer{}, err
 	}
 
@@ -109,18 +69,22 @@ func (l *Ledger) Reverse(ctx context.Context, tx pgx.Tx, transferID uuid.UUID, r
 		reversalMetadata = payload
 	}
 
-	originalUUID := uuidFromPg(originalID)
-	source := sourceAccountID
-	destination := destinationAccountID
 	return l.Post(ctx, tx, PostingRequest{
 		Type:                 TransferTypeReversal,
-		SourceAccountID:      uuidPtrFromPg(destination),
-		DestinationAccountID: uuidPtrFromPg(source),
-		Amount:               amount,
-		Currency:             currency,
-		Reference:            textPtrFromPg(reference),
-		ReversesTransferID:   &originalUUID,
+		SourceAccountID:      original.DestinationAccountID,
+		DestinationAccountID: original.SourceAccountID,
+		Amount:               original.Amount,
+		Currency:             original.Currency,
+		Reference:            original.Reference,
+		ReversesTransferID:   &original.ID,
 		Metadata:             reversalMetadata,
 		Entries:              entries,
 	})
+}
+
+func (d Direction) opposite() Direction {
+	if d == DirectionCredit {
+		return DirectionDebit
+	}
+	return DirectionCredit
 }

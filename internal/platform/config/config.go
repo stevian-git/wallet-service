@@ -42,9 +42,9 @@ type ConsumerConfig struct {
 }
 
 func Load() (Config, error) {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		return Config{}, fmt.Errorf("DATABASE_URL is required and must use the ledger_app role")
+	databaseURL, err := requireDatabaseURL()
+	if err != nil {
+		return Config{}, err
 	}
 
 	apiKey := os.Getenv("API_KEY")
@@ -52,24 +52,18 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("API_KEY is required")
 	}
 
-	port := os.Getenv("APP_PORT")
-	if port == "" {
-		port = "8080"
-	}
+	port := envOr("APP_PORT", "8080")
 
-	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	level, err := logLevel()
 	if err != nil {
 		return Config{}, err
 	}
 
-	lease := 30 * time.Second
-	if raw := os.Getenv("IDEMPOTENCY_LEASE_SECONDS"); raw != "" {
-		seconds, err := strconv.Atoi(raw)
-		if err != nil || seconds <= 0 {
-			return Config{}, fmt.Errorf("IDEMPOTENCY_LEASE_SECONDS must be a positive integer")
-		}
-		lease = time.Duration(seconds) * time.Second
+	leaseSeconds, err := envPositiveInt("IDEMPOTENCY_LEASE_SECONDS", 30)
+	if err != nil {
+		return Config{}, err
 	}
+	lease := time.Duration(leaseSeconds) * time.Second
 
 	return Config{
 		Port:             port,
@@ -81,27 +75,21 @@ func Load() (Config, error) {
 }
 
 func LoadHoldSweeper() (HoldSweeperConfig, error) {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		return HoldSweeperConfig{}, fmt.Errorf("DATABASE_URL is required and must use the ledger_app role")
-	}
-	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	databaseURL, err := requireDatabaseURL()
 	if err != nil {
 		return HoldSweeperConfig{}, err
 	}
-	interval := 5 * time.Second
-	if raw := os.Getenv("HOLD_SWEEP_INTERVAL"); raw != "" {
-		interval, err = time.ParseDuration(raw)
-		if err != nil || interval <= 0 {
-			return HoldSweeperConfig{}, fmt.Errorf("HOLD_SWEEP_INTERVAL must be a positive duration")
-		}
+	level, err := logLevel()
+	if err != nil {
+		return HoldSweeperConfig{}, err
 	}
-	batchSize := 100
-	if raw := os.Getenv("HOLD_SWEEP_BATCH_SIZE"); raw != "" {
-		batchSize, err = strconv.Atoi(raw)
-		if err != nil || batchSize <= 0 {
-			return HoldSweeperConfig{}, fmt.Errorf("HOLD_SWEEP_BATCH_SIZE must be a positive integer")
-		}
+	interval, err := envPositiveDuration("HOLD_SWEEP_INTERVAL", 5*time.Second)
+	if err != nil {
+		return HoldSweeperConfig{}, err
+	}
+	batchSize, err := envPositiveInt("HOLD_SWEEP_BATCH_SIZE", 100)
+	if err != nil {
+		return HoldSweeperConfig{}, err
 	}
 	return HoldSweeperConfig{
 		DatabaseURL: databaseURL,
@@ -112,42 +100,30 @@ func LoadHoldSweeper() (HoldSweeperConfig, error) {
 }
 
 func LoadRelay() (RelayConfig, error) {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		return RelayConfig{}, fmt.Errorf("DATABASE_URL is required and must use the ledger_app role")
+	databaseURL, err := requireDatabaseURL()
+	if err != nil {
+		return RelayConfig{}, err
 	}
 	brokers, err := kafkaBrokers()
 	if err != nil {
 		return RelayConfig{}, err
 	}
-	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	level, err := logLevel()
 	if err != nil {
 		return RelayConfig{}, err
 	}
-	topic := os.Getenv("KAFKA_TOPIC")
-	if topic == "" {
-		topic = "ledger.events.v1"
+	topic := envOr("KAFKA_TOPIC", "ledger.events.v1")
+	batchSize, err := envPositiveInt("OUTBOX_BATCH_SIZE", 50)
+	if err != nil {
+		return RelayConfig{}, err
 	}
-	batchSize := 50
-	if raw := os.Getenv("OUTBOX_BATCH_SIZE"); raw != "" {
-		batchSize, err = strconv.Atoi(raw)
-		if err != nil || batchSize <= 0 {
-			return RelayConfig{}, fmt.Errorf("OUTBOX_BATCH_SIZE must be a positive integer")
-		}
+	pollInterval, err := envPositiveDuration("OUTBOX_POLL_INTERVAL", time.Second)
+	if err != nil {
+		return RelayConfig{}, err
 	}
-	pollInterval := time.Second
-	if raw := os.Getenv("OUTBOX_POLL_INTERVAL"); raw != "" {
-		pollInterval, err = time.ParseDuration(raw)
-		if err != nil || pollInterval <= 0 {
-			return RelayConfig{}, fmt.Errorf("OUTBOX_POLL_INTERVAL must be a positive duration")
-		}
-	}
-	maxBackoff := 30 * time.Second
-	if raw := os.Getenv("OUTBOX_MAX_BACKOFF"); raw != "" {
-		maxBackoff, err = time.ParseDuration(raw)
-		if err != nil || maxBackoff <= 0 {
-			return RelayConfig{}, fmt.Errorf("OUTBOX_MAX_BACKOFF must be a positive duration")
-		}
+	maxBackoff, err := envPositiveDuration("OUTBOX_MAX_BACKOFF", 30*time.Second)
+	if err != nil {
+		return RelayConfig{}, err
 	}
 	return RelayConfig{
 		DatabaseURL:  databaseURL,
@@ -165,18 +141,12 @@ func LoadConsumer() (ConsumerConfig, error) {
 	if err != nil {
 		return ConsumerConfig{}, err
 	}
-	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	level, err := logLevel()
 	if err != nil {
 		return ConsumerConfig{}, err
 	}
-	topic := os.Getenv("KAFKA_TOPIC")
-	if topic == "" {
-		topic = "ledger.events.v1"
-	}
-	group := os.Getenv("KAFKA_CONSUMER_GROUP")
-	if group == "" {
-		group = "ledger-consumer-demo"
-	}
+	topic := envOr("KAFKA_TOPIC", "ledger.events.v1")
+	group := envOr("KAFKA_CONSUMER_GROUP", "ledger-consumer-demo")
 	return ConsumerConfig{LogLevel: level, Brokers: brokers, Topic: topic, Group: group}, nil
 }
 
@@ -187,20 +157,17 @@ type ReconcilerConfig struct {
 }
 
 func LoadReconciler() (ReconcilerConfig, error) {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		return ReconcilerConfig{}, fmt.Errorf("DATABASE_URL is required and must use the ledger_app role")
-	}
-	level, err := parseLogLevel(os.Getenv("LOG_LEVEL"))
+	databaseURL, err := requireDatabaseURL()
 	if err != nil {
 		return ReconcilerConfig{}, err
 	}
-	pollInterval := 5 * time.Second
-	if raw := os.Getenv("RECONCILER_POLL_INTERVAL"); raw != "" {
-		pollInterval, err = time.ParseDuration(raw)
-		if err != nil || pollInterval <= 0 {
-			return ReconcilerConfig{}, fmt.Errorf("RECONCILER_POLL_INTERVAL must be a positive duration")
-		}
+	level, err := logLevel()
+	if err != nil {
+		return ReconcilerConfig{}, err
+	}
+	pollInterval, err := envPositiveDuration("RECONCILER_POLL_INTERVAL", 5*time.Second)
+	if err != nil {
+		return ReconcilerConfig{}, err
 	}
 	return ReconcilerConfig{
 		DatabaseURL:  databaseURL,
@@ -241,4 +208,47 @@ func parseLogLevel(raw string) (slog.Level, error) {
 	default:
 		return slog.LevelInfo, fmt.Errorf("LOG_LEVEL must be debug, info, warn, or error")
 	}
+}
+
+func requireDatabaseURL() (string, error) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		return "", fmt.Errorf("DATABASE_URL is required and must use the ledger_app role")
+	}
+	return databaseURL, nil
+}
+
+func logLevel() (slog.Level, error) {
+	return parseLogLevel(os.Getenv("LOG_LEVEL"))
+}
+
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envPositiveInt(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
+}
+
+func envPositiveDuration(name string, fallback time.Duration) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
+	}
+	return value, nil
 }

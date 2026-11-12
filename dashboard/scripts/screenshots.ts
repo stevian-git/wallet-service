@@ -1,8 +1,40 @@
-import { chromium } from '@playwright/test'
+import { chromium, type Page } from '@playwright/test'
 
 const BASE_URL = process.env.DASHBOARD_URL || 'http://localhost:5173'
+const API_URL = process.env.API_URL || 'http://localhost:8080'
 const API_KEY = process.env.API_KEY || 'dev_api_key'
 const OUTPUT_DIR = process.env.OUTPUT_DIR || '../docs/screenshots'
+
+// Optional: pin detail pages to specific records. When unset, the first
+// account/transfer link on the list page and the newest run are used.
+const ACCOUNT_ID = process.env.ACCOUNT_ID
+const TRANSFER_ID = process.env.TRANSFER_ID
+const RUN_ID = process.env.RUN_ID
+
+async function capture(page: Page, path: string, file: string) {
+  console.log(`Capturing ${path}...`)
+  await page.goto(`${BASE_URL}${path}`)
+  await page.waitForLoadState('networkidle')
+  await page.waitForTimeout(500)
+  await page.screenshot({ path: `${OUTPUT_DIR}/${file}`, fullPage: false })
+  console.log(`  Saved ${file}`)
+}
+
+async function firstLink(page: Page, listPath: string, prefix: string): Promise<string | null> {
+  await page.goto(`${BASE_URL}${listPath}`)
+  await page.waitForLoadState('networkidle')
+  const link = await page.$(`a[href^="${prefix}"]`)
+  return link ? link.getAttribute('href') : null
+}
+
+async function newestRunId(): Promise<string | null> {
+  const res = await fetch(`${API_URL}/v1/reconciliation/runs?limit=1`, {
+    headers: { 'X-API-Key': API_KEY },
+  })
+  if (!res.ok) return null
+  const body = (await res.json()) as { data: { id: string }[] }
+  return body.data[0]?.id ?? null
+}
 
 async function main() {
   const browser = await chromium.launch()
@@ -17,49 +49,19 @@ async function main() {
     localStorage.setItem('apiKey', key)
   }, API_KEY)
 
-  const pages = [
-    { path: '/accounts', file: 'accounts-list.png', wait: 2000 },
-    { path: '/transfers', file: 'transfers-list.png', wait: 2000 },
-    { path: '/reconciliation', file: 'reconciliation.png', wait: 2000 },
-    { path: '/integrity', file: 'integrity.png', wait: 2000 },
-  ]
+  await capture(page, '/accounts', 'accounts-list.png')
+  await capture(page, '/transfers', 'transfers-list.png')
+  await capture(page, '/reconciliation', 'reconciliation.png')
+  await capture(page, '/integrity', 'integrity.png')
 
-  for (const p of pages) {
-    console.log(`Capturing ${p.path}...`)
-    await page.goto(`${BASE_URL}${p.path}`)
-    await page.waitForTimeout(p.wait)
-    await page.screenshot({ path: `${OUTPUT_DIR}/${p.file}`, fullPage: false })
-    console.log(`  Saved ${p.file}`)
-  }
+  const accountPath = ACCOUNT_ID ? `/accounts/${ACCOUNT_ID}` : await firstLink(page, '/accounts', '/accounts/')
+  if (accountPath) await capture(page, accountPath, 'account-detail.png')
 
-  // Try to capture detail pages if data exists
-  await page.goto(`${BASE_URL}/accounts`)
-  await page.waitForTimeout(1000)
-  const firstAccountLink = await page.$('a[href^="/accounts/"]')
-  if (firstAccountLink) {
-    const href = await firstAccountLink.getAttribute('href')
-    if (href) {
-      console.log(`Capturing ${href}...`)
-      await page.goto(`${BASE_URL}${href}`)
-      await page.waitForTimeout(2000)
-      await page.screenshot({ path: `${OUTPUT_DIR}/account-detail.png`, fullPage: false })
-      console.log('  Saved account-detail.png')
-    }
-  }
+  const transferPath = TRANSFER_ID ? `/transfers/${TRANSFER_ID}` : await firstLink(page, '/transfers', '/transfers/')
+  if (transferPath) await capture(page, transferPath, 'transfer-detail.png')
 
-  await page.goto(`${BASE_URL}/transfers`)
-  await page.waitForTimeout(1000)
-  const firstTransferLink = await page.$('a[href^="/transfers/"]')
-  if (firstTransferLink) {
-    const href = await firstTransferLink.getAttribute('href')
-    if (href) {
-      console.log(`Capturing ${href}...`)
-      await page.goto(`${BASE_URL}${href}`)
-      await page.waitForTimeout(2000)
-      await page.screenshot({ path: `${OUTPUT_DIR}/transfer-detail.png`, fullPage: false })
-      console.log('  Saved transfer-detail.png')
-    }
-  }
+  const runId = RUN_ID || (await newestRunId())
+  if (runId) await capture(page, `/reconciliation/${runId}`, 'reconciliation-run.png')
 
   await browser.close()
   console.log('\nDone! Screenshots saved to', OUTPUT_DIR)
