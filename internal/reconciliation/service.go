@@ -49,8 +49,23 @@ func (s *Service) Reconciler() *Reconciler {
 }
 
 func (s *Service) CreateRun(ctx context.Context, input CreateRunInput) (ReconciliationRun, error) {
+	return createRun(ctx, s.pool, input)
+}
+
+// CreateRunTx creates a run inside the caller's transaction, so the API can
+// make run creation idempotent alongside the idempotency key.
+func (s *Service) CreateRunTx(ctx context.Context, tx pgx.Tx, input CreateRunInput) (ReconciliationRun, error) {
+	return createRun(ctx, tx, input)
+}
+
+// rowQuerier is satisfied by both *pgxpool.Pool and pgx.Tx.
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func createRun(ctx context.Context, q rowQuerier, input CreateRunInput) (ReconciliationRun, error) {
 	var exists bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM settlement_files WHERE id = $1)`, input.FileID).Scan(&exists)
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM settlement_files WHERE id = $1)`, input.FileID).Scan(&exists)
 	if err != nil {
 		return ReconciliationRun{}, err
 	}
@@ -58,7 +73,7 @@ func (s *Service) CreateRun(ctx context.Context, input CreateRunInput) (Reconcil
 		return ReconciliationRun{}, ErrFileNotFound
 	}
 
-	return scanRun(s.pool.QueryRow(ctx, `
+	return scanRun(q.QueryRow(ctx, `
 		INSERT INTO reconciliation_runs (id, file_id)
 		VALUES ($1, $2)
 		RETURNING `+runColumns, uuid.New(), input.FileID))

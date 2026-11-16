@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/db"
 	"github.com/stevians/wallet-service/internal/platform/log"
@@ -74,14 +75,16 @@ func main() {
 		logger.Info("claimed reconciliation run", "run_id", run.ID, "file_id", run.FileID)
 
 		if err := reconciler.Execute(ctx, *run); err != nil {
-			if errors.Is(err, ctx.Err()) {
+			switch {
+			case errors.Is(err, ctx.Err()):
 				logger.Warn("reconciliation run interrupted, leaving status=running for retry",
 					"run_id", run.ID)
-				continue
-			}
-			logger.Error("execute reconciliation", "run_id", run.ID, "error", err)
-			if markErr := reconciler.MarkFailed(ctx, run.ID, err.Error()); markErr != nil {
-				logger.Error("mark run failed", "run_id", run.ID, "error", markErr)
+			case errors.Is(err, reconciliation.ErrRunBusy), errors.Is(err, reconciliation.ErrRunNotRunning):
+				// Another worker took or finished this run between claim and execute.
+				logger.Debug("reconciliation run skipped", "run_id", run.ID, "reason", err)
+			default:
+				logger.Error("execute reconciliation", "run_id", run.ID, "error", err)
+				markFailed(ctx, logger, reconciler, run.ID, err)
 			}
 			continue
 		}
@@ -89,6 +92,16 @@ func main() {
 		logger.Info("reconciliation run completed", "run_id", run.ID)
 	}
 	logger.Info("reconciler worker shutting down")
+}
+
+// markFailed records the failure even while shutting down, so a run that failed
+// for a real reason is not retried forever after a restart.
+func markFailed(ctx context.Context, logger *slog.Logger, reconciler *reconciliation.Reconciler, runID uuid.UUID, cause error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := reconciler.MarkFailed(ctx, runID, cause.Error()); err != nil {
+		logger.Error("mark run failed", "run_id", runID, "error", err)
+	}
 }
 
 // sleep waits for d or until ctx is cancelled; it reports whether to keep going.

@@ -35,17 +35,23 @@ Key requirements:
 
 ### Run Flow
 
-1. Client creates run via `POST /v1/reconciliation/runs` with `file_id`
+1. Client creates run via `POST /v1/reconciliation/runs` with `file_id` and an
+   `Idempotency-Key`; a retry with the same key replays the first run
 2. Server inserts `reconciliation_runs` row with `status='running'`, returns 202
-3. Worker polls for `running` runs, claims one with `FOR UPDATE SKIP LOCKED`
-4. Worker executes reconciliation in a single `REPEATABLE READ` transaction:
+3. Worker polls for a `running` run that no other worker has locked
+   (`FOR UPDATE SKIP LOCKED`; this pick holds no lock)
+4. Worker executes reconciliation in a single `REPEATABLE READ` transaction whose
+   first statement locks the run row (`FOR UPDATE SKIP LOCKED`) until commit.
+   If the row is locked or the run is no longer `running`, the worker skips it:
    - Loads all `settlement_records` for the file
    - Loads transfers in scope (non-reversal, with reference, within settlement_date UTC)
    - Compares by reference, detects discrepancies
    - Batch-inserts discrepancies (500 per batch via `COPY`)
-   - Updates run status to `completed` with counts
-5. If worker crashes: run remains `running`, can be retried by another worker
-6. If reconciliation fails: run marked `failed` with error message
+   - Updates run status to `completed` with counts (only while still `running`)
+5. If worker crashes: the lock is released with its connection and the run
+   remains `running`, so another worker retries it
+6. If reconciliation fails: run marked `failed` with error message (only while
+   still `running`, so a late failure cannot overwrite a completed run)
 
 ### Discrepancy Kinds
 
@@ -68,7 +74,8 @@ Settlement records matched by `our_reference` (nullable). Records with
 ### Concurrency
 
 - Multiple workers can run concurrently
-- Each worker claims one run at a time with `FOR UPDATE SKIP LOCKED`
+- A run is executed by at most one worker at a time: the run row lock is held
+  for the whole execution transaction, and other workers skip locked runs
 - Advisory locks not used; row-level locking sufficient
 - Multiple runs per file allowed (no one-run-per-file constraint)
 
@@ -83,15 +90,19 @@ Settlement records matched by `our_reference` (nullable). Records with
 ### Positive
 
 - Crash-safe: interrupted runs can be retried without data loss
-- Idempotent: same run executed twice produces same result (discrepancies deduplicated by run_id)
+- At most once per run: concurrent workers cannot both record discrepancies for
+  one run; comparison output is deterministic (references are compared in sorted order)
 - Scalable: batch inserts handle large files efficiently
 - Flexible: multiple runs per file allow re-processing after corrections
 
 ### Negative
 
 - Full settlement load: if files exceed memory, need to implement streaming comparison
-- No advisory locks: if a worker holds a run for too long, another worker cannot steal it
-  (mitigated by worker timeout or manual intervention)
+- No lease or attempt counter yet: a run that crashes the worker (e.g. OOM on a
+  very large file) stays `running` and is retried forever at the head of the
+  queue. Needs a schema change (attempts / lease columns).
+- The run row stays locked for the whole run, so very large runs hold a long
+  `REPEATABLE READ` snapshot (delays vacuum).
 
 ### Neutral
 
