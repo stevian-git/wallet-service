@@ -47,24 +47,41 @@ func NewReconciler(pool *pgxpool.Pool) *Reconciler {
 	return &Reconciler{pool: pool}
 }
 
-// ClaimRun picks the oldest running run that no worker is executing right now.
-// It does not keep a lock: Execute takes the real claim, so a run picked by two
+// ClaimRun picks the running run that is due soonest and that no worker is
+// executing right now. It counts the attempt and pushes next_attempt_at out by
+// an exponential backoff in the same committed statement, so a worker that dies
+// mid-run still uses up an attempt and the run waits before it is retried
+// instead of blocking the queue. Runs past retry.MaxAttempts are marked failed.
+// The claim holds no lock: Execute takes the real lock, so a run picked by two
 // workers at the same moment is still executed only once.
-func (r *Reconciler) ClaimRun(ctx context.Context) (*ReconciliationRun, error) {
-	run, err := scanRun(r.pool.QueryRow(ctx, `
-		SELECT `+runColumns+`
-		  FROM reconciliation_runs
-		 WHERE status = 'running'
-		 ORDER BY started_at
-		 LIMIT 1
-		 FOR UPDATE SKIP LOCKED`))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+func (r *Reconciler) ClaimRun(ctx context.Context, retry RetryPolicy) (*ReconciliationRun, error) {
+	for {
+		run, err := scanRun(r.pool.QueryRow(ctx, `
+			UPDATE reconciliation_runs
+			   SET attempts = attempts + 1,
+			       next_attempt_at = now() + make_interval(secs => least($1::float8 * power(2, attempts), $2::float8))
+			 WHERE id = (
+				SELECT id FROM reconciliation_runs
+				 WHERE status = 'running' AND next_attempt_at <= now()
+				 ORDER BY next_attempt_at
+				 LIMIT 1
+				 FOR UPDATE SKIP LOCKED)
+			RETURNING `+runColumns,
+			retry.Base.Seconds(), retry.Max.Seconds()))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if run.Attempts <= retry.MaxAttempts {
+			return &run, nil
+		}
+		msg := fmt.Sprintf("gave up after %d attempts", retry.MaxAttempts)
+		if err := r.MarkFailed(ctx, run.ID, msg); err != nil {
+			return nil, fmt.Errorf("fail exhausted run %s: %w", run.ID, err)
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &run, nil
 }
 
 // Execute reconciles one run in a single REPEATABLE READ transaction. It first
@@ -292,9 +309,18 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 
 		matchedCount++
 
+		if len(transfersForRef) > 1 {
+			discrepancies = append(discrepancies, Discrepancy{
+				Kind:       DiscrepancyDuplicateInLedger,
+				TransferID: &tID,
+				Note:       strPtr(fmt.Sprintf("duplicate reference in ledger: %s (count: %d)", ref, len(transfersForRef))),
+				Resolution: resolutionOpen,
+			})
+		}
+
 		if ledgerCur, settledCur, ok := sameCurrency(transfersForRef, paid); !ok {
 			discrepancies = append(discrepancies, Discrepancy{
-				Kind:               DiscrepancyAmountMismatch,
+				Kind:               DiscrepancyCurrencyMismatch,
 				TransferID:         &tID,
 				SettlementRecordID: &recID,
 				Note:               strPtr(fmt.Sprintf("currency mismatch: ledger %s, settlement %s", ledgerCur, settledCur)),

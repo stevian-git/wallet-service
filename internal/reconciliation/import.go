@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -59,28 +58,6 @@ func (imp *Importer) Import(ctx context.Context, input ImportInput) (SettlementF
 		RecordCount:    len(records),
 	}
 
-	tx, err := imp.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.ReadCommitted,
-	})
-	if err != nil {
-		return SettlementFile{}, err
-	}
-	defer tx.Rollback(ctx)
-
-	err = tx.QueryRow(ctx, `
-		INSERT INTO settlement_files (id, provider, file_name, file_sha256, settlement_date, record_count)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING imported_at`,
-		file.ID, file.Provider, file.FileName, file.FileSHA256, file.SettlementDate, file.RecordCount,
-	).Scan(&file.ImportedAt)
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return SettlementFile{}, ErrDuplicateFile
-		}
-		return SettlementFile{}, err
-	}
-
 	settlementRecords := make([]SettlementRecord, 0, len(records))
 	for i, raw := range records {
 		rec, err := toSettlementRecord(file.ID, raw, i+1)
@@ -90,13 +67,62 @@ func (imp *Importer) Import(ctx context.Context, input ImportInput) (SettlementF
 		settlementRecords = append(settlementRecords, rec)
 	}
 
+	if err := imp.insertFile(ctx, &file, settlementRecords); err != nil {
+		return SettlementFile{}, err
+	}
+	return file, nil
+}
+
+// insertFile stores the file and its records in one transaction and marks the
+// currently active file for the same provider and date as superseded by it.
+func (imp *Importer) insertFile(ctx context.Context, file *SettlementFile, records []SettlementRecord) error {
+	tx, err := imp.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.ReadCommitted,
+	})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Imports for the same provider and date are serialized by a
+	// transaction-scoped advisory lock: without it, two concurrent imports both
+	// see the same active file and the loser fails on settlement_files_one_active
+	// (which stays as the backstop). Imports for other providers/dates do not wait.
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"settlement_file:"+file.Provider+":"+file.SettlementDate.Format(time.DateOnly))
+	if err != nil {
+		return fmt.Errorf("lock provider/date: %w", err)
+	}
+
+	// The FK to the new file is deferred, so the old file can point to it
+	// before the INSERT below.
+	_, err = tx.Exec(ctx, `
+		UPDATE settlement_files SET superseded_by = $1
+		 WHERE provider = $2 AND settlement_date = $3 AND superseded_by IS NULL`,
+		file.ID, file.Provider, file.SettlementDate)
+	if err != nil {
+		return fmt.Errorf("supersede previous file: %w", err)
+	}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO settlement_files (id, provider, file_name, file_sha256, settlement_date, record_count)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING imported_at`,
+		file.ID, file.Provider, file.FileName, file.FileSHA256, file.SettlementDate, file.RecordCount,
+	).Scan(&file.ImportedAt)
+	if err != nil {
+		if uniqueViolationOn(err, "settlement_files_file_sha256_key") {
+			return ErrDuplicateFile
+		}
+		return err
+	}
+
 	// One COPY streams every row; there is no need to chunk or to materialise
 	// a second [][]any copy of the file in memory.
 	_, err = tx.CopyFrom(ctx,
 		pgx.Identifier{"settlement_records"},
 		[]string{"file_id", "provider_ref", "our_reference", "amount", "currency", "status", "occurred_at"},
-		pgx.CopyFromSlice(len(settlementRecords), func(i int) ([]any, error) {
-			rec := settlementRecords[i]
+		pgx.CopyFromSlice(len(records), func(i int) ([]any, error) {
+			rec := records[i]
 			return []any{
 				rec.FileID, rec.ProviderRef, rec.OurReference,
 				rec.Amount, rec.Currency, rec.Status, rec.OccurredAt,
@@ -104,14 +130,10 @@ func (imp *Importer) Import(ctx context.Context, input ImportInput) (SettlementF
 		}),
 	)
 	if err != nil {
-		return SettlementFile{}, err
+		return err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return SettlementFile{}, err
-	}
-
-	return file, nil
+	return tx.Commit(ctx)
 }
 
 func parseCSV(content []byte) ([][]string, error) {

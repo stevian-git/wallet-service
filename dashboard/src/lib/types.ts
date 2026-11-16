@@ -53,6 +53,7 @@ export interface SettlementFile {
   settlement_date: string;
   record_count: number;
   imported_at: string;
+  superseded_by: string | null;
 }
 
 export interface ReconciliationRun {
@@ -64,12 +65,20 @@ export interface ReconciliationRun {
   matched_count: number;
   discrepancy_count: number;
   error: string | null;
+  attempts: number;
 }
 
 export interface Discrepancy {
   id: number;
   run_id: string;
-  kind: 'missing_in_ledger' | 'missing_in_settlement' | 'amount_mismatch' | 'status_mismatch' | 'duplicate_in_settlement';
+  kind:
+    | 'missing_in_ledger'
+    | 'missing_in_settlement'
+    | 'amount_mismatch'
+    | 'status_mismatch'
+    | 'duplicate_in_settlement'
+    | 'duplicate_in_ledger'
+    | 'currency_mismatch';
   transfer_id: string | null;
   settlement_record_id: number | null;
   expected_amount: number | null;

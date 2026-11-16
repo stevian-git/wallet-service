@@ -108,7 +108,9 @@ function DiscrepanciesTable({ runId }: { runId: string }) {
     missing_in_settlement: 'Missing in Settlement',
     amount_mismatch: 'Amount Mismatch',
     status_mismatch: 'Status Mismatch',
-    duplicate_in_settlement: 'Duplicate',
+    duplicate_in_settlement: 'Duplicate in Settlement',
+    duplicate_in_ledger: 'Duplicate in Ledger',
+    currency_mismatch: 'Currency Mismatch',
   }
 
   return (

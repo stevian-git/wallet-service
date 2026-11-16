@@ -233,12 +233,13 @@ func holdView(hold ledger.Hold) HoldView {
 }
 
 type SettlementFileView struct {
-	ID             uuid.UUID `json:"id"`
-	Provider       string    `json:"provider"`
-	FileName       string    `json:"file_name"`
-	SettlementDate string    `json:"settlement_date"`
-	RecordCount    int       `json:"record_count"`
-	ImportedAt     time.Time `json:"imported_at"`
+	ID             uuid.UUID  `json:"id"`
+	Provider       string     `json:"provider"`
+	FileName       string     `json:"file_name"`
+	SettlementDate string     `json:"settlement_date"`
+	RecordCount    int        `json:"record_count"`
+	ImportedAt     time.Time  `json:"imported_at"`
+	SupersededBy   *uuid.UUID `json:"superseded_by"`
 }
 
 type SettlementFilesPageView struct {
@@ -255,6 +256,7 @@ type ReconciliationRunView struct {
 	MatchedCount     int        `json:"matched_count"`
 	DiscrepancyCount int        `json:"discrepancy_count"`
 	Error            *string    `json:"error"`
+	Attempts         int        `json:"attempts"`
 }
 
 type ReconciliationRunsPageView struct {

@@ -216,26 +216,26 @@ func TestServiceRunsAndPagination(t *testing.T) {
 		t.Fatalf("get unknown run: err = %v, want ErrRunNotFound", err)
 	}
 
-	csv := `provider_ref,our_reference,amount,currency,status,occurred_at
-prov-1,ref-a,100,IDR,success,2026-10-26T10:00:00Z
-prov-2,ref-b,200,IDR,success,2026-10-26T10:00:00Z
-prov-3,ref-c,300,IDR,success,2026-10-26T10:00:00Z
-`
-	file, err := svc.Import(ctx, ImportInput{
-		Provider: "p", FileName: "f.csv", FileContent: []byte(csv),
-		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
-	})
-	if err != nil {
-		t.Fatalf("import: %v", err)
-	}
-
+	// One active run per file, so each run gets its own file (distinct provider).
 	var runIDs []uuid.UUID
 	for i := 0; i < 3; i++ {
+		csv := fmt.Sprintf(`provider_ref,our_reference,amount,currency,status,occurred_at
+prov-%[1]d-1,ref-%[1]d-a,100,IDR,success,2026-10-26T10:00:00Z
+prov-%[1]d-2,ref-%[1]d-b,200,IDR,success,2026-10-26T10:00:00Z
+prov-%[1]d-3,ref-%[1]d-c,300,IDR,success,2026-10-26T10:00:00Z
+`, i)
+		file, err := svc.Import(ctx, ImportInput{
+			Provider: fmt.Sprintf("p%d", i), FileName: "f.csv", FileContent: []byte(csv),
+			SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("import: %v", err)
+		}
 		run, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID})
 		if err != nil {
 			t.Fatalf("create run: %v", err)
 		}
-		if run.Status != RunStatusRunning || run.FileID != file.ID {
+		if run.Status != RunStatusRunning || run.FileID != file.ID || run.Attempts != 0 {
 			t.Fatalf("created run = %+v", run)
 		}
 		runIDs = append(runIDs, run.ID)
@@ -254,7 +254,7 @@ prov-3,ref-c,300,IDR,success,2026-10-26T10:00:00Z
 	}
 
 	files, err := svc.ListSettlementFiles(ctx, ListSettlementFilesInput{})
-	if err != nil || len(files.Data) != 1 || files.NextCursor != nil || files.Data[0].RecordCount != 3 {
+	if err != nil || len(files.Data) != 3 || files.NextCursor != nil || files.Data[0].RecordCount != 3 {
 		t.Fatalf("files: %+v err=%v", files, err)
 	}
 
@@ -360,7 +360,7 @@ prov-3,ref-c,300,IDR,success,2026-10-26T10:00:00Z
 	}
 
 	// A finished run is no longer a candidate for any worker.
-	next, err := svc.Reconciler().ClaimRun(ctx)
+	next, err := svc.Reconciler().ClaimRun(ctx, testRetry)
 	if err != nil || next != nil {
 		t.Fatalf("claim after completion = %+v, err = %v; want nil", next, err)
 	}
@@ -400,9 +400,8 @@ func TestCompareCurrencyMismatch(t *testing.T) {
 
 	discrepancies, _ := compare(settlements, transfers)
 
-	if len(discrepancies) != 1 || discrepancies[0].Kind != DiscrepancyAmountMismatch ||
-		discrepancies[0].Note == nil || !strings.Contains(*discrepancies[0].Note, "currency") {
-		t.Fatalf("discrepancies = %+v, want one currency amount_mismatch", discrepancies)
+	if len(discrepancies) != 1 || discrepancies[0].Kind != DiscrepancyCurrencyMismatch {
+		t.Fatalf("discrepancies = %+v, want one currency_mismatch", discrepancies)
 	}
 }
 
@@ -422,5 +421,198 @@ func TestCompareFailedSettlementIsNotCountedAsPaid(t *testing.T) {
 	}
 	if len(discrepancies) != 1 || discrepancies[0].Kind != DiscrepancyStatusMismatch {
 		t.Fatalf("discrepancies = %+v, want one status_mismatch", discrepancies)
+	}
+}
+
+var testRetry = RetryPolicy{MaxAttempts: 3, Base: time.Minute, Max: time.Hour}
+
+func importCSV(t *testing.T, svc *Service, provider, date string, rows ...string) SettlementFile {
+	t.Helper()
+	d, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		t.Fatalf("parse date: %v", err)
+	}
+	content := "provider_ref,our_reference,amount,currency,status,occurred_at\n" + strings.Join(rows, "\n") + "\n"
+	file, err := svc.Import(context.Background(), ImportInput{
+		Provider: provider, FileName: "f.csv", FileContent: []byte(content), SettlementDate: d,
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	return file
+}
+
+func TestImportSupersedesPreviousFile(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+
+	original := importCSV(t, svc, "bank_a", "2026-10-26", "prov-1,ref-1,100,IDR,success,2026-10-26T10:00:00Z")
+	other := importCSV(t, svc, "bank_b", "2026-10-26", "prov-b1,ref-1,100,IDR,success,2026-10-26T10:00:00Z")
+	corrected := importCSV(t, svc, "bank_a", "2026-10-26", "prov-1,ref-1,150,IDR,success,2026-10-26T10:00:00Z")
+
+	files, err := svc.ListSettlementFiles(ctx, ListSettlementFilesInput{})
+	if err != nil {
+		t.Fatalf("list files: %v", err)
+	}
+	byID := map[uuid.UUID]SettlementFile{}
+	for _, f := range files.Data {
+		byID[f.ID] = f
+	}
+	if got := byID[original.ID].SupersededBy; got == nil || *got != corrected.ID {
+		t.Fatalf("original superseded_by = %v, want %s", got, corrected.ID)
+	}
+	if byID[corrected.ID].SupersededBy != nil || byID[other.ID].SupersededBy != nil {
+		t.Fatalf("corrected/other file must stay active: %+v / %+v", byID[corrected.ID], byID[other.ID])
+	}
+
+	if _, err := svc.CreateRun(ctx, CreateRunInput{FileID: original.ID}); !errors.Is(err, ErrFileSuperseded) {
+		t.Fatalf("run on superseded file: err = %v, want ErrFileSuperseded", err)
+	}
+	if _, err := svc.CreateRun(ctx, CreateRunInput{FileID: corrected.ID}); err != nil {
+		t.Fatalf("run on active file: %v", err)
+	}
+}
+
+func TestConcurrentImportsLeaveOneActiveFile(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+
+	const importers = 4
+	start := make(chan struct{})
+	errs := make(chan error, importers)
+	var wg sync.WaitGroup
+	for i := 0; i < importers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			content := fmt.Sprintf("provider_ref,our_reference,amount,currency,status,occurred_at\nprov-%d,ref-1,100,IDR,success,2026-10-26T10:00:00Z\n", i)
+			_, err := svc.Import(ctx, ImportInput{
+				Provider: "bank_a", FileName: "f.csv", FileContent: []byte(content),
+				SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
+			})
+			errs <- err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent import: %v", err)
+		}
+	}
+
+	var active, total int
+	if err := pg.Pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE superseded_by IS NULL), count(*)
+		  FROM settlement_files WHERE provider = 'bank_a'`).Scan(&active, &total); err != nil {
+		t.Fatalf("count files: %v", err)
+	}
+	if active != 1 || total != importers {
+		t.Fatalf("active = %d total = %d, want 1 active of %d", active, total, importers)
+	}
+}
+
+func TestCreateRunAllowsOneActiveRunPerFile(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+	file := importCSV(t, svc, "bank_a", "2026-10-26", "prov-1,ref-1,100,IDR,success,2026-10-26T10:00:00Z")
+
+	run, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if _, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID}); !errors.Is(err, ErrRunInProgress) {
+		t.Fatalf("second run while first is running: err = %v, want ErrRunInProgress", err)
+	}
+
+	if err := svc.Reconciler().Execute(ctx, run); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if _, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID}); err != nil {
+		t.Fatalf("re-run after completion: %v", err)
+	}
+}
+
+func TestClaimRunCountsAttemptsAndBacksOff(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+	file := importCSV(t, svc, "bank_a", "2026-10-26", "prov-1,ref-1,100,IDR,success,2026-10-26T10:00:00Z")
+	created, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	claimed, err := svc.Reconciler().ClaimRun(ctx, testRetry)
+	if err != nil || claimed == nil || claimed.ID != created.ID {
+		t.Fatalf("claim = %+v, err = %v; want run %s", claimed, err, created.ID)
+	}
+	if claimed.Attempts != 1 || !claimed.NextAttemptAt.After(time.Now().Add(testRetry.Base/2)) {
+		t.Fatalf("claimed attempts=%d next_attempt_at=%s, want 1 and about now+%s",
+			claimed.Attempts, claimed.NextAttemptAt, testRetry.Base)
+	}
+
+	// The worker "crashed": the run stays running but is not retried before its backoff.
+	again, err := svc.Reconciler().ClaimRun(ctx, testRetry)
+	if err != nil || again != nil {
+		t.Fatalf("claim during backoff = %+v, err = %v; want nil", again, err)
+	}
+}
+
+func TestClaimRunFailsRunPastMaxAttempts(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+	poison := importCSV(t, svc, "bank_a", "2026-10-26", "prov-1,ref-1,100,IDR,success,2026-10-26T10:00:00Z")
+	healthy := importCSV(t, svc, "bank_b", "2026-10-26", "prov-b1,ref-1,100,IDR,success,2026-10-26T10:00:00Z")
+
+	poisonRun, err := svc.CreateRun(ctx, CreateRunInput{FileID: poison.ID})
+	if err != nil {
+		t.Fatalf("create poison run: %v", err)
+	}
+	healthyRun, err := svc.CreateRun(ctx, CreateRunInput{FileID: healthy.ID})
+	if err != nil {
+		t.Fatalf("create healthy run: %v", err)
+	}
+	// The poison run already used every attempt and is due again, ahead of the healthy run.
+	if _, err := pg.Pool.Exec(ctx, `
+		UPDATE reconciliation_runs SET attempts = $2, next_attempt_at = now() - interval '1 hour'
+		 WHERE id = $1`, poisonRun.ID, testRetry.MaxAttempts); err != nil {
+		t.Fatalf("exhaust attempts: %v", err)
+	}
+
+	claimed, err := svc.Reconciler().ClaimRun(ctx, testRetry)
+	if err != nil || claimed == nil || claimed.ID != healthyRun.ID {
+		t.Fatalf("claim = %+v, err = %v; want healthy run %s", claimed, err, healthyRun.ID)
+	}
+
+	got, err := svc.GetRun(ctx, poisonRun.ID)
+	if err != nil {
+		t.Fatalf("get poison run: %v", err)
+	}
+	if got.Status != RunStatusFailed || got.Error == nil || !strings.Contains(*got.Error, "attempts") {
+		t.Fatalf("poison run = %+v, want failed with an attempts error", got)
+	}
+}
+
+func TestCompareDuplicateInLedger(t *testing.T) {
+	ref := "ref-1"
+	settlements := []SettlementRecord{
+		{ID: 1, ProviderRef: "prov-1", OurReference: &ref, Amount: 20000, Currency: "IDR", Status: "success"},
+	}
+	transfers := []transferRow{
+		{ID: uuid.New(), Reference: ref, Amount: 10000, Currency: "IDR", Status: "posted"},
+		{ID: uuid.New(), Reference: ref, Amount: 10000, Currency: "IDR", Status: "posted"},
+	}
+
+	discrepancies, _ := compare(settlements, transfers)
+
+	if len(discrepancies) != 1 || discrepancies[0].Kind != DiscrepancyDuplicateInLedger {
+		t.Fatalf("discrepancies = %+v, want one duplicate_in_ledger", discrepancies)
 	}
 }

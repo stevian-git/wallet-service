@@ -6,24 +6,36 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stevians/wallet-service/internal/pagination"
 )
 
 var (
-	ErrRunNotFound  = errors.New("reconciliation run not found")
-	ErrFileNotFound = errors.New("settlement file not found")
+	ErrRunNotFound    = errors.New("reconciliation run not found")
+	ErrFileNotFound   = errors.New("settlement file not found")
+	ErrFileSuperseded = errors.New("settlement file has been superseded by a newer file")
+	ErrRunInProgress  = errors.New("a reconciliation run for this file is already in progress")
 )
 
-const runColumns = `id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error`
+// Index name from migration 0002, used to tell unique violations apart.
+const constraintOneActiveRunPerFile = "recon_runs_one_active_per_file"
+
+const runColumns = `id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error, attempts, next_attempt_at`
 
 func scanRun(row pgx.Row) (ReconciliationRun, error) {
 	var run ReconciliationRun
 	err := row.Scan(
 		&run.ID, &run.FileID, &run.Status, &run.StartedAt,
 		&run.FinishedAt, &run.MatchedCount, &run.DiscrepancyCount, &run.Error,
+		&run.Attempts, &run.NextAttemptAt,
 	)
 	return run, err
+}
+
+func uniqueViolationOn(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
 }
 
 type Service struct {
@@ -64,19 +76,26 @@ type rowQuerier interface {
 }
 
 func createRun(ctx context.Context, q rowQuerier, input CreateRunInput) (ReconciliationRun, error) {
-	var exists bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM settlement_files WHERE id = $1)`, input.FileID).Scan(&exists)
+	var supersededBy *uuid.UUID
+	err := q.QueryRow(ctx, `SELECT superseded_by FROM settlement_files WHERE id = $1`, input.FileID).Scan(&supersededBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ReconciliationRun{}, ErrFileNotFound
+	}
 	if err != nil {
 		return ReconciliationRun{}, err
 	}
-	if !exists {
-		return ReconciliationRun{}, ErrFileNotFound
+	if supersededBy != nil {
+		return ReconciliationRun{}, ErrFileSuperseded
 	}
 
-	return scanRun(q.QueryRow(ctx, `
+	run, err := scanRun(q.QueryRow(ctx, `
 		INSERT INTO reconciliation_runs (id, file_id)
 		VALUES ($1, $2)
 		RETURNING `+runColumns, uuid.New(), input.FileID))
+	if uniqueViolationOn(err, constraintOneActiveRunPerFile) {
+		return ReconciliationRun{}, ErrRunInProgress
+	}
+	return run, err
 }
 
 func (s *Service) GetRun(ctx context.Context, runID uuid.UUID) (ReconciliationRun, error) {
@@ -162,7 +181,7 @@ func (s *Service) ListSettlementFiles(ctx context.Context, input ListSettlementF
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, provider, file_name, file_sha256, settlement_date, record_count, imported_at
+		SELECT id, provider, file_name, file_sha256, settlement_date, record_count, imported_at, superseded_by
 		  FROM settlement_files
 		 WHERE ($1::uuid IS NULL OR id < $1)
 		 ORDER BY id DESC
@@ -172,7 +191,7 @@ func (s *Service) ListSettlementFiles(ctx context.Context, input ListSettlementF
 	}
 	files, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SettlementFile, error) {
 		var f SettlementFile
-		err := row.Scan(&f.ID, &f.Provider, &f.FileName, &f.FileSHA256, &f.SettlementDate, &f.RecordCount, &f.ImportedAt)
+		err := row.Scan(&f.ID, &f.Provider, &f.FileName, &f.FileSHA256, &f.SettlementDate, &f.RecordCount, &f.ImportedAt, &f.SupersededBy)
 		return f, err
 	})
 	if err != nil {

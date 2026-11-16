@@ -64,6 +64,10 @@ func From(err error) *Error {
 		return &Error{Status: http.StatusNotFound, Code: "not_found", Title: "Not found", Detail: err.Error()}
 	case errors.Is(err, reconciliation.ErrDuplicateFile):
 		return &Error{Status: http.StatusConflict, Code: "duplicate_file", Title: "Duplicate file", Detail: err.Error()}
+	case errors.Is(err, reconciliation.ErrRunInProgress):
+		return &Error{Status: http.StatusConflict, Code: "run_in_progress", Title: "Reconciliation run in progress", Detail: err.Error()}
+	case errors.Is(err, reconciliation.ErrFileSuperseded):
+		return &Error{Status: http.StatusConflict, Code: "file_superseded", Title: "Settlement file superseded", Detail: err.Error()}
 	default:
 		return &Error{Status: http.StatusInternalServerError, Title: "Internal server error"}
 	}

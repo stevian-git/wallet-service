@@ -1,6 +1,7 @@
 -- =============================================================================
--- Mini Core Banking / Wallet Ledger : initial schema (PostgreSQL 15+)
+-- Mini Core Banking / Wallet Ledger : schema (PostgreSQL 15+)
 -- =============================================================================
+-- Hasil akhir setelah migrations/0001_init dan 0002_reconciliation_hardening.
 -- Konvensi:
 --   * Semua uang disimpan sebagai BIGINT dalam minor unit (IDR = exponent 0,
 --     jadi 15000 berarti Rp15.000). Tidak pernah float/numeric untuk saldo.
@@ -35,7 +36,9 @@ CREATE TYPE discrepancy_kind AS ENUM (
   'missing_in_settlement',    -- ada di ledger kita, tidak ada di file settlement
   'amount_mismatch',
   'status_mismatch',
-  'duplicate_in_settlement'
+  'duplicate_in_settlement',
+  'duplicate_in_ledger',      -- satu reference dipakai lebih dari satu transfer di ledger (0002)
+  'currency_mismatch'         -- currency ledger dan settlement berbeda (0002)
 );
 
 -- -----------------------------------------------------------------------------
@@ -97,6 +100,7 @@ CREATE TABLE transfers (
 CREATE INDEX transfers_source_idx      ON transfers (source_account_id, created_at DESC);
 CREATE INDEX transfers_destination_idx ON transfers (destination_account_id, created_at DESC);
 CREATE INDEX transfers_reference_idx   ON transfers (reference) WHERE reference IS NOT NULL;
+CREATE INDEX transfers_created_at_ref_idx ON transfers (created_at) WHERE reference IS NOT NULL; -- scope reconciler (0002)
 
 CREATE TABLE ledger_entries (
   id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -181,8 +185,16 @@ CREATE TABLE settlement_files (
   file_sha256     bytea       NOT NULL UNIQUE,        -- cegah impor file yang sama dua kali
   settlement_date date        NOT NULL,
   record_count    int         NOT NULL,
-  imported_at     timestamptz NOT NULL DEFAULT now()
+  imported_at     timestamptz NOT NULL DEFAULT now(),
+  -- File koreksi untuk provider + tanggal yang sama menggantikan file lama (0002).
+  -- DEFERRABLE: impor mengisi kolom ini di file lama sebelum file baru di-INSERT.
+  superseded_by   uuid REFERENCES settlement_files (id) DEFERRABLE INITIALLY DEFERRED,
+  CONSTRAINT settlement_files_not_self_superseded CHECK (superseded_by <> id)
 );
+
+-- Hanya satu file aktif per provider + tanggal settlement (0002)
+CREATE UNIQUE INDEX settlement_files_one_active
+  ON settlement_files (provider, settlement_date) WHERE superseded_by IS NULL;
 
 CREATE TABLE settlement_records (
   id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -206,8 +218,18 @@ CREATE TABLE reconciliation_runs (
   finished_at       timestamptz,
   matched_count     int          NOT NULL DEFAULT 0,
   discrepancy_count int          NOT NULL DEFAULT 0,
-  error             text
+  error             text,
+  -- Retry dengan backoff (0002): attempts naik setiap kali worker mengambil run;
+  -- run yang workernya mati baru bisa diambil lagi setelah next_attempt_at.
+  attempts          int          NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  next_attempt_at   timestamptz  NOT NULL DEFAULT now()
 );
+
+-- Paling banyak satu run aktif per file (0002)
+CREATE UNIQUE INDEX recon_runs_one_active_per_file
+  ON reconciliation_runs (file_id) WHERE status = 'running';
+CREATE INDEX recon_runs_claim_idx
+  ON reconciliation_runs (next_attempt_at) WHERE status = 'running';
 
 CREATE TABLE reconciliation_discrepancies (
   id                   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -315,6 +337,9 @@ GRANT UPDATE (status, transfer_id, resolved_at)                            ON ho
 GRANT UPDATE (status, response_code, response_body, locked_until)          ON idempotency_keys             TO ledger_app;
 GRANT UPDATE (published_at, attempts, last_error)                          ON outbox_events                TO ledger_app;
 GRANT UPDATE (status, finished_at, matched_count, discrepancy_count, error) ON reconciliation_runs         TO ledger_app;
+GRANT UPDATE (attempts, next_attempt_at)                                   ON reconciliation_runs          TO ledger_app;
+-- Satu-satunya kolom settlement_files yang boleh berubah: penanda file koreksi (0002)
+GRANT UPDATE (superseded_by)                                               ON settlement_files             TO ledger_app;
 GRANT UPDATE (resolution, note)                                            ON reconciliation_discrepancies TO ledger_app;
 
 -- Pembersihan key idempotency yang sudah kedaluwarsa
