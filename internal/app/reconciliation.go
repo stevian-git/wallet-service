@@ -2,9 +2,12 @@ package app
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/stevians/wallet-service/internal/idempotency"
 	"github.com/stevians/wallet-service/internal/reconciliation"
 )
 
@@ -36,12 +39,16 @@ func (s *Service) ImportSettlementFile(ctx context.Context, provider, fileName s
 	return settlementFileView(file), nil
 }
 
-func (s *Service) CreateReconciliationRun(ctx context.Context, fileID uuid.UUID) (ReconciliationRunView, error) {
-	run, err := s.recon.CreateRun(ctx, reconciliation.CreateRunInput{FileID: fileID})
-	if err != nil {
-		return ReconciliationRunView{}, err
-	}
-	return reconciliationRunView(run), nil
+// CreateReconciliationRun queues a run under the request's Idempotency-Key, so a
+// client retry replays the first run instead of reconciling the file again.
+func (s *Service) CreateReconciliationRun(ctx context.Context, meta Meta, fileID uuid.UUID) (Result, error) {
+	return s.do(ctx, meta, func(ctx context.Context, tx pgx.Tx) (idempotency.Response, error) {
+		run, err := s.recon.CreateRunTx(ctx, tx, reconciliation.CreateRunInput{FileID: fileID})
+		if err != nil {
+			return idempotency.Response{}, err
+		}
+		return jsonResponse(http.StatusAccepted, reconciliationRunView(run))
+	})
 }
 
 func (s *Service) GetReconciliationRun(ctx context.Context, runID uuid.UUID) (ReconciliationRunView, error) {

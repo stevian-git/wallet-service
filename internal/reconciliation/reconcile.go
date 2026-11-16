@@ -4,15 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // resolutionOpen is the initial resolution of every discrepancy a run records.
 const resolutionOpen = "open"
+
+// Settlement record statuses accepted by the importer.
+const (
+	settlementStatusFailed   = "failed"
+	settlementStatusReversed = "reversed"
+)
+
+var (
+	// ErrRunBusy means another worker holds the run; the caller should move on.
+	ErrRunBusy = errors.New("reconciliation run is being executed by another worker")
+	// ErrRunNotRunning means the run already finished (completed or failed).
+	ErrRunNotRunning = errors.New("reconciliation run is not running")
+)
 
 type transferRow struct {
 	ID          uuid.UUID
@@ -31,18 +47,17 @@ func NewReconciler(pool *pgxpool.Pool) *Reconciler {
 	return &Reconciler{pool: pool}
 }
 
+// ClaimRun picks the oldest running run that no worker is executing right now.
+// It does not keep a lock: Execute takes the real claim, so a run picked by two
+// workers at the same moment is still executed only once.
 func (r *Reconciler) ClaimRun(ctx context.Context) (*ReconciliationRun, error) {
 	run, err := scanRun(r.pool.QueryRow(ctx, `
-		UPDATE reconciliation_runs
-		SET status = 'running'
-		WHERE id = (
-			SELECT id FROM reconciliation_runs
-			WHERE status = 'running'
-			ORDER BY started_at
-			LIMIT 1
-			FOR UPDATE SKIP LOCKED
-		)
-		RETURNING `+runColumns))
+		SELECT `+runColumns+`
+		  FROM reconciliation_runs
+		 WHERE status = 'running'
+		 ORDER BY started_at
+		 LIMIT 1
+		 FOR UPDATE SKIP LOCKED`))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -52,15 +67,12 @@ func (r *Reconciler) ClaimRun(ctx context.Context) (*ReconciliationRun, error) {
 	return &run, nil
 }
 
+// Execute reconciles one run in a single REPEATABLE READ transaction. It first
+// locks the run row and holds that lock until commit, so concurrent workers get
+// ErrRunBusy (or ErrRunNotRunning once it has finished) instead of recording the
+// same discrepancies twice. If the worker dies the lock is released with the
+// connection and the still-running run can be picked up again.
 func (r *Reconciler) Execute(ctx context.Context, run ReconciliationRun) error {
-	var settlementDate time.Time
-	err := r.pool.QueryRow(ctx, `
-		SELECT settlement_date FROM settlement_files WHERE id = $1
-	`, run.FileID).Scan(&settlementDate)
-	if err != nil {
-		return fmt.Errorf("lookup settlement date: %w", err)
-	}
-
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel: pgx.RepeatableRead,
 	})
@@ -68,6 +80,18 @@ func (r *Reconciler) Execute(ctx context.Context, run ReconciliationRun) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	if err := lockRunForExecution(ctx, tx, run.ID); err != nil {
+		return err
+	}
+
+	var settlementDate time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT settlement_date FROM settlement_files WHERE id = $1
+	`, run.FileID).Scan(&settlementDate)
+	if err != nil {
+		return fmt.Errorf("lookup settlement date: %w", err)
+	}
 
 	settlementRecords, err := loadSettlementRecords(ctx, tx, run.FileID)
 	if err != nil {
@@ -97,24 +121,58 @@ func (r *Reconciler) Execute(ctx context.Context, run ReconciliationRun) error {
 		return fmt.Errorf("insert discrepancies: %w", err)
 	}
 
-	now := time.Now().UTC()
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE reconciliation_runs
 		SET status = 'completed', finished_at = $2, matched_count = $3, discrepancy_count = $4
-		WHERE id = $1
-	`, run.ID, now, matchedCount, len(discrepancies))
+		WHERE id = $1 AND status = 'running'
+	`, run.ID, time.Now().UTC(), matchedCount, len(discrepancies))
 	if err != nil {
 		return fmt.Errorf("update run: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrRunNotRunning
 	}
 
 	return tx.Commit(ctx)
 }
 
+// lockRunForExecution takes the run row lock as the transaction's first
+// statement. A run locked by another worker is skipped (ErrRunBusy); a run that
+// already finished, or that changed after this snapshot, is not executed again.
+func lockRunForExecution(ctx context.Context, tx pgx.Tx, runID uuid.UUID) error {
+	var status RunStatus
+	err := tx.QueryRow(ctx, `
+		SELECT status FROM reconciliation_runs
+		 WHERE id = $1
+		 FOR UPDATE SKIP LOCKED
+	`, runID).Scan(&status)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Locked by another worker (or deleted, which the schema never does).
+		return ErrRunBusy
+	case isSerializationFailure(err):
+		// Another worker finished the run after our snapshot was taken.
+		return ErrRunNotRunning
+	case err != nil:
+		return fmt.Errorf("lock run: %w", err)
+	case status != RunStatusRunning:
+		return ErrRunNotRunning
+	}
+	return nil
+}
+
+func isSerializationFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40001"
+}
+
+// MarkFailed records a failed run. It only touches a run that is still running,
+// so a late failure from one worker cannot overwrite another worker's result.
 func (r *Reconciler) MarkFailed(ctx context.Context, runID uuid.UUID, errMsg string) error {
 	_, err := r.pool.Exec(ctx, `
 		UPDATE reconciliation_runs
 		SET status = 'failed', finished_at = now(), error = $2
-		WHERE id = $1
+		WHERE id = $1 AND status = 'running'
 	`, runID, errMsg)
 	return err
 }
@@ -147,6 +205,7 @@ func loadTransfersInScope(ctx context.Context, tx pgx.Tx, settlementDate time.Ti
 		FROM transfers t
 		WHERE t.reference IS NOT NULL
 		  AND t.type != 'reversal'
+		  AND t.status = 'posted'
 		  AND t.created_at >= $1
 		  AND t.created_at < $2
 		ORDER BY t.created_at, t.id
@@ -161,6 +220,9 @@ func loadTransfersInScope(ctx context.Context, tx pgx.Tx, settlementDate time.Ti
 	})
 }
 
+// compare matches settlement records to ledger transfers by reference. Map keys
+// are walked in sorted order so the same inputs always yield the same
+// discrepancies in the same order.
 func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrepancy, int) {
 	var discrepancies []Discrepancy
 	matchedCount := 0
@@ -180,7 +242,8 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 		transferByRef[t.Reference] = append(transferByRef[t.Reference], t)
 	}
 
-	for ref, recs := range settlementByRef {
+	for _, ref := range slices.Sorted(maps.Keys(settlementByRef)) {
+		recs := settlementByRef[ref]
 		if len(recs) > 1 {
 			firstID := recs[0].ID
 			discrepancies = append(discrepancies, Discrepancy{
@@ -205,53 +268,65 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 			continue
 		}
 
+		tID := transfersForRef[0].ID
+		recID := recs[0].ID
+
+		// A record the provider reports as failed did not move money, so it
+		// neither pays for the transfer nor counts toward the settled amount.
+		var paid []SettlementRecord
+		for _, rec := range recs {
+			if rec.Status != settlementStatusFailed {
+				paid = append(paid, rec)
+			}
+		}
+		if len(paid) == 0 {
+			discrepancies = append(discrepancies, Discrepancy{
+				Kind:               DiscrepancyStatusMismatch,
+				TransferID:         &tID,
+				SettlementRecordID: &recID,
+				Note:               strPtr("settlement status=failed but ledger transfer is posted"),
+				Resolution:         resolutionOpen,
+			})
+			continue
+		}
+
 		matchedCount++
 
-		var totalSettlementAmount int64
-		for _, rec := range recs {
-			totalSettlementAmount += rec.Amount
-		}
-
-		var totalTransferAmount int64
-		for _, t := range transfersForRef {
-			totalTransferAmount += t.Amount
-		}
-
-		if totalTransferAmount != totalSettlementAmount {
-			expected := totalTransferAmount
-			actual := totalSettlementAmount
-			tID := transfersForRef[0].ID
-			recID := recs[0].ID
+		if ledgerCur, settledCur, ok := sameCurrency(transfersForRef, paid); !ok {
 			discrepancies = append(discrepancies, Discrepancy{
 				Kind:               DiscrepancyAmountMismatch,
 				TransferID:         &tID,
 				SettlementRecordID: &recID,
-				ExpectedAmount:     &expected,
-				ActualAmount:       &actual,
-				Note:               strPtr(fmt.Sprintf("expected %d, got %d", expected, actual)),
+				Note:               strPtr(fmt.Sprintf("currency mismatch: ledger %s, settlement %s", ledgerCur, settledCur)),
 				Resolution:         resolutionOpen,
 			})
-		}
-
-		transferHasReversal := false
-		for _, t := range transfersForRef {
-			if t.HasReversal {
-				transferHasReversal = true
-				break
+		} else {
+			var totalSettlementAmount int64
+			for _, rec := range paid {
+				totalSettlementAmount += rec.Amount
+			}
+			var totalTransferAmount int64
+			for _, t := range transfersForRef {
+				totalTransferAmount += t.Amount
+			}
+			if totalTransferAmount != totalSettlementAmount {
+				expected := totalTransferAmount
+				actual := totalSettlementAmount
+				discrepancies = append(discrepancies, Discrepancy{
+					Kind:               DiscrepancyAmountMismatch,
+					TransferID:         &tID,
+					SettlementRecordID: &recID,
+					ExpectedAmount:     &expected,
+					ActualAmount:       &actual,
+					Note:               strPtr(fmt.Sprintf("expected %d, got %d", expected, actual)),
+					Resolution:         resolutionOpen,
+				})
 			}
 		}
 
-		settlementReversed := false
-		for _, rec := range recs {
-			if rec.Status == "reversed" {
-				settlementReversed = true
-				break
-			}
-		}
-
+		transferHasReversal := slices.ContainsFunc(transfersForRef, func(t transferRow) bool { return t.HasReversal })
+		settlementReversed := slices.ContainsFunc(paid, func(rec SettlementRecord) bool { return rec.Status == settlementStatusReversed })
 		if transferHasReversal != settlementReversed {
-			tID := transfersForRef[0].ID
-			recID := recs[0].ID
 			discrepancies = append(discrepancies, Discrepancy{
 				Kind:               DiscrepancyStatusMismatch,
 				TransferID:         &tID,
@@ -272,21 +347,39 @@ func compare(settlements []SettlementRecord, transfers []transferRow) ([]Discrep
 		})
 	}
 
-	for ref, transfersForRef := range transferByRef {
-		if _, settled := settlementByRef[ref]; !settled {
-			for _, t := range transfersForRef {
-				tID := t.ID
-				discrepancies = append(discrepancies, Discrepancy{
-					Kind:       DiscrepancyMissingInSettlement,
-					TransferID: &tID,
-					Note:       strPtr(fmt.Sprintf("transfer %s has no matching settlement record", ref)),
-					Resolution: resolutionOpen,
-				})
-			}
+	for _, ref := range slices.Sorted(maps.Keys(transferByRef)) {
+		if _, settled := settlementByRef[ref]; settled {
+			continue
+		}
+		for _, t := range transferByRef[ref] {
+			tID := t.ID
+			discrepancies = append(discrepancies, Discrepancy{
+				Kind:       DiscrepancyMissingInSettlement,
+				TransferID: &tID,
+				Note:       strPtr(fmt.Sprintf("transfer %s has no matching settlement record", ref)),
+				Resolution: resolutionOpen,
+			})
 		}
 	}
 
 	return discrepancies, matchedCount
+}
+
+// sameCurrency reports whether every transfer and settlement record for one
+// reference uses the same currency, returning the first of each for the note.
+func sameCurrency(transfers []transferRow, recs []SettlementRecord) (ledger, settled string, ok bool) {
+	ledger, settled = transfers[0].Currency, recs[0].Currency
+	for _, t := range transfers {
+		if t.Currency != ledger {
+			return ledger, t.Currency, false
+		}
+	}
+	for _, rec := range recs {
+		if rec.Currency != ledger {
+			return ledger, rec.Currency, false
+		}
+	}
+	return ledger, settled, true
 }
 
 func strPtr(s string) *string {

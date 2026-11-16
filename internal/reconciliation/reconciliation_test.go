@@ -3,7 +3,10 @@ package reconciliation
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -287,5 +290,137 @@ prov-3,ref-c,300,IDR,success,2026-10-26T10:00:00Z
 
 	if _, err := svc.ListDiscrepancies(ctx, ListDiscrepanciesInput{RunID: run.ID, Cursor: "!!"}); err == nil || err.Error() != "invalid cursor" {
 		t.Fatalf("bad cursor: err = %v", err)
+	}
+}
+
+// TestExecuteConcurrentWorkersReconcileOnce runs the same run from several
+// workers at once. Exactly one may record discrepancies; the rest must back off.
+func TestExecuteConcurrentWorkersReconcileOnce(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+
+	csv := `provider_ref,our_reference,amount,currency,status,occurred_at
+prov-1,ref-a,100,IDR,success,2026-10-26T10:00:00Z
+prov-2,ref-b,200,IDR,success,2026-10-26T10:00:00Z
+prov-3,ref-c,300,IDR,success,2026-10-26T10:00:00Z
+`
+	file, err := svc.Import(ctx, ImportInput{
+		Provider: "p", FileName: "f.csv", FileContent: []byte(csv),
+		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	run, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	const workers = 4
+	errs := make(chan error, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- svc.Reconciler().Execute(ctx, run)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	succeeded := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrRunBusy), errors.Is(err, ErrRunNotRunning):
+		default:
+			t.Fatalf("unexpected execute error: %v", err)
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("successful executions = %d, want 1", succeeded)
+	}
+
+	var rows int
+	if err := pg.Pool.QueryRow(ctx, `SELECT count(*) FROM reconciliation_discrepancies WHERE run_id = $1`, run.ID).Scan(&rows); err != nil {
+		t.Fatalf("count discrepancies: %v", err)
+	}
+	got, err := svc.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if rows != 3 || got.DiscrepancyCount != 3 || got.Status != RunStatusCompleted {
+		t.Fatalf("rows=%d run=%+v, want 3 discrepancies on a completed run", rows, got)
+	}
+
+	// A finished run is no longer a candidate for any worker.
+	next, err := svc.Reconciler().ClaimRun(ctx)
+	if err != nil || next != nil {
+		t.Fatalf("claim after completion = %+v, err = %v; want nil", next, err)
+	}
+}
+
+func TestCompareIsDeterministic(t *testing.T) {
+	var settlements []SettlementRecord
+	var transfers []transferRow
+	for i := 0; i < 50; i++ {
+		ref := fmt.Sprintf("ref-%02d", i)
+		settlements = append(settlements, SettlementRecord{
+			ID: int64(i + 1), ProviderRef: "p" + ref, OurReference: strPtr(ref),
+			Amount: int64(100 + i%3), Currency: "IDR", Status: "success",
+		})
+		transfers = append(transfers, transferRow{
+			ID: uuid.New(), Reference: fmt.Sprintf("ref-%02d", i+25), Amount: 100, Currency: "IDR", Status: "posted",
+		})
+	}
+
+	want, wantMatched := compare(settlements, transfers)
+	for i := 0; i < 20; i++ {
+		got, matched := compare(settlements, transfers)
+		if matched != wantMatched || !reflect.DeepEqual(got, want) {
+			t.Fatalf("run %d: compare output differs between identical calls", i)
+		}
+	}
+}
+
+func TestCompareCurrencyMismatch(t *testing.T) {
+	ref := "ref-1"
+	settlements := []SettlementRecord{
+		{ID: 1, ProviderRef: "prov-1", OurReference: &ref, Amount: 10000, Currency: "USD", Status: "success"},
+	}
+	transfers := []transferRow{
+		{ID: uuid.New(), Reference: ref, Amount: 10000, Currency: "IDR", Status: "posted"},
+	}
+
+	discrepancies, _ := compare(settlements, transfers)
+
+	if len(discrepancies) != 1 || discrepancies[0].Kind != DiscrepancyAmountMismatch ||
+		discrepancies[0].Note == nil || !strings.Contains(*discrepancies[0].Note, "currency") {
+		t.Fatalf("discrepancies = %+v, want one currency amount_mismatch", discrepancies)
+	}
+}
+
+func TestCompareFailedSettlementIsNotCountedAsPaid(t *testing.T) {
+	ref := "ref-1"
+	settlements := []SettlementRecord{
+		{ID: 1, ProviderRef: "prov-1", OurReference: &ref, Amount: 10000, Currency: "IDR", Status: "failed"},
+	}
+	transfers := []transferRow{
+		{ID: uuid.New(), Reference: ref, Amount: 10000, Currency: "IDR", Status: "posted"},
+	}
+
+	discrepancies, matched := compare(settlements, transfers)
+
+	if matched != 0 {
+		t.Errorf("matched = %d, want 0 (provider reports the payment failed)", matched)
+	}
+	if len(discrepancies) != 1 || discrepancies[0].Kind != DiscrepancyStatusMismatch {
+		t.Fatalf("discrepancies = %+v, want one status_mismatch", discrepancies)
 	}
 }

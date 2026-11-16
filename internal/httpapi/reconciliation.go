@@ -61,13 +61,13 @@ func (s *Server) handleCreateReconciliationRun(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	view, err := s.app.CreateReconciliationRun(r.Context(), body.Request.FileID)
+	result, err := s.app.CreateReconciliationRun(r.Context(), s.meta(r, body.Raw), body.Request.FileID)
 	if err != nil {
 		s.writeProblem(w, r, err)
 		return
 	}
 
-	s.writeJSON(w, http.StatusAccepted, view)
+	s.writeResult(w, result)
 }
 
 func (s *Server) handleGetReconciliationRun(w http.ResponseWriter, r *http.Request) {
