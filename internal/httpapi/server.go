@@ -28,14 +28,26 @@ import (
 const maxBodyBytes = 1 << 20
 
 type Server struct {
-	app    *app.Service
-	log    *slog.Logger
-	apiKey string
-	ready  func(context.Context) error
+	app            *app.Service
+	log            *slog.Logger
+	apiKey         string
+	allowedOrigins map[string]bool
+	anyOrigin      bool
+	ready          func(context.Context) error
 }
 
-func New(service *app.Service, logger *slog.Logger, apiKey string, ready func(context.Context) error) *Server {
-	return &Server{app: service, log: logger, apiKey: apiKey, ready: ready}
+// New builds the HTTP server. allowedOrigins lists the browser origins that
+// get CORS headers; "*" allows any origin, and an empty list allows none.
+func New(service *app.Service, logger *slog.Logger, apiKey string, allowedOrigins []string, ready func(context.Context) error) *Server {
+	s := &Server{app: service, log: logger, apiKey: apiKey, allowedOrigins: map[string]bool{}, ready: ready}
+	for _, origin := range allowedOrigins {
+		if origin == "*" {
+			s.anyOrigin = true
+			continue
+		}
+		s.allowedOrigins[origin] = true
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -205,24 +217,43 @@ func (s *Server) withBodyLimit(next http.Handler) http.Handler {
 	})
 }
 
+// withCORS answers only allowlisted origins. Credentials are not allowed:
+// clients authenticate with X-API-Key, not cookies, so a browser never needs
+// to send ambient credentials cross-origin.
 func (s *Server) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Request-ID")
-			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Add("Vary", "Origin")
+			if allow := s.corsAllowOrigin(origin); allow != "" {
+				w.Header().Set("Access-Control-Allow-Origin", allow)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Request-ID, Idempotency-Key")
+				w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, Idempotent-Replayed")
+				w.Header().Set("Access-Control-Max-Age", "86400")
+			}
 		}
 
-		if r.Method == "OPTIONS" {
+		// A preflight from a disallowed origin also gets 204, but without CORS
+		// headers, so the browser blocks the real request.
+		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) corsAllowOrigin(origin string) string {
+	switch {
+	case s.anyOrigin:
+		return "*"
+	case s.allowedOrigins[origin]:
+		return origin
+	default:
+		return ""
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

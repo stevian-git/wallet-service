@@ -47,3 +47,26 @@ func TestLoadAPIRequiresDatabaseURLAndValidatesLease(t *testing.T) {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 }
+
+func TestLoadAPIAllowedOrigins(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("API_KEY", "k")
+
+	t.Setenv("CORS_ALLOWED_ORIGINS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AllowedOrigins) != 1 || cfg.AllowedOrigins[0] != "http://localhost:5173" {
+		t.Fatalf("default AllowedOrigins = %q", cfg.AllowedOrigins)
+	}
+
+	t.Setenv("CORS_ALLOWED_ORIGINS", " https://a.example , ,https://b.example ")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.AllowedOrigins) != 2 || cfg.AllowedOrigins[0] != "https://a.example" || cfg.AllowedOrigins[1] != "https://b.example" {
+		t.Fatalf("AllowedOrigins = %q", cfg.AllowedOrigins)
+	}
+}

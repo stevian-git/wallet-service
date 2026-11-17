@@ -42,7 +42,7 @@ func TestHTTPAPIEndToEnd(t *testing.T) {
 	pg := testutil.NewPostgres(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second), reconciliation.NewService(pg.Pool))
-	server := New(service, logger, testAPIKey, pg.Pool.Ping)
+	server := New(service, logger, testAPIKey, nil, pg.Pool.Ping)
 	client := &apiClient{t: t, handler: server.Handler()}
 
 	health := client.request(http.MethodGet, "/healthz", nil, "", false)
@@ -392,5 +392,48 @@ func decode(t *testing.T, recorder *httptest.ResponseRecorder, dst any) {
 	t.Helper()
 	if err := json.Unmarshal(recorder.Body.Bytes(), dst); err != nil {
 		t.Fatalf("decode response %q: %v", recorder.Body.String(), err)
+	}
+}
+
+// TestCORSAllowsOnlyConfiguredOrigins: only allowlisted origins get CORS
+// headers, credentials are never allowed (auth is X-API-Key, not cookies), and
+// "*" allows any origin.
+func TestCORSAllowsOnlyConfiguredOrigins(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ping := func(context.Context) error { return nil }
+
+	preflight := func(handler http.Handler, origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodOptions, "/v1/accounts", nil)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	handler := New(nil, logger, testAPIKey, []string{"http://localhost:5173"}, ping).Handler()
+
+	allowed := preflight(handler, "http://localhost:5173")
+	if allowed.Code != http.StatusNoContent {
+		t.Fatalf("allowed preflight status = %d", allowed.Code)
+	}
+	if got := allowed.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+		t.Fatalf("allowed origin header = %q", got)
+	}
+	if got := allowed.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want unset", got)
+	}
+	if got := allowed.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want Origin", got)
+	}
+
+	denied := preflight(handler, "http://evil.test")
+	if got := denied.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("denied origin got Access-Control-Allow-Origin = %q", got)
+	}
+
+	any := New(nil, logger, testAPIKey, []string{"*"}, ping).Handler()
+	if got := preflight(any, "http://evil.test").Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("wildcard Access-Control-Allow-Origin = %q, want *", got)
 	}
 }

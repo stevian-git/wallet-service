@@ -15,6 +15,9 @@ type Config struct {
 	APIKey           string
 	LogLevel         slog.Level
 	IdempotencyLease time.Duration
+	// AllowedOrigins are the browser origins that get CORS headers; "*"
+	// allows any origin.
+	AllowedOrigins []string
 }
 
 type HoldSweeperConfig struct {
@@ -71,6 +74,7 @@ func Load() (Config, error) {
 		APIKey:           apiKey,
 		LogLevel:         level,
 		IdempotencyLease: lease,
+		AllowedOrigins:   allowedOrigins(),
 	}, nil
 }
 
@@ -205,18 +209,33 @@ func kafkaBrokers() ([]string, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("KAFKA_BROKERS is required (comma-separated host:port list)")
 	}
-	parts := strings.Split(raw, ",")
-	brokers := make([]string, 0, len(parts))
-	for _, part := range parts {
-		broker := strings.TrimSpace(part)
-		if broker != "" {
-			brokers = append(brokers, broker)
-		}
-	}
+	brokers := splitList(raw)
 	if len(brokers) == 0 {
 		return nil, fmt.Errorf("KAFKA_BROKERS must contain at least one host:port")
 	}
 	return brokers, nil
+}
+
+// allowedOrigins defaults to the dashboard dev server, so a local setup works
+// without configuration and nothing else is allowed by accident.
+func allowedOrigins() []string {
+	origins := splitList(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if len(origins) == 0 {
+		return []string{"http://localhost:5173"}
+	}
+	return origins
+}
+
+// splitList splits a comma-separated value and drops empty items.
+func splitList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 func parseLogLevel(raw string) (slog.Level, error) {
