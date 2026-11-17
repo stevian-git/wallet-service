@@ -154,6 +154,9 @@ type ReconcilerConfig struct {
 	DatabaseURL  string
 	LogLevel     slog.Level
 	PollInterval time.Duration
+	MaxAttempts  int           // claims per run before it is marked failed
+	RetryBase    time.Duration // backoff before retrying a run whose worker died
+	RetryMax     time.Duration // backoff cap
 }
 
 func LoadReconciler() (ReconcilerConfig, error) {
@@ -169,10 +172,25 @@ func LoadReconciler() (ReconcilerConfig, error) {
 	if err != nil {
 		return ReconcilerConfig{}, err
 	}
+	maxAttempts, err := envPositiveInt("RECONCILER_MAX_ATTEMPTS", 5)
+	if err != nil {
+		return ReconcilerConfig{}, err
+	}
+	retryBase, err := envPositiveDuration("RECONCILER_RETRY_BASE", 30*time.Second)
+	if err != nil {
+		return ReconcilerConfig{}, err
+	}
+	retryMax, err := envPositiveDuration("RECONCILER_RETRY_MAX", 30*time.Minute)
+	if err != nil {
+		return ReconcilerConfig{}, err
+	}
 	return ReconcilerConfig{
 		DatabaseURL:  databaseURL,
 		LogLevel:     level,
 		PollInterval: pollInterval,
+		MaxAttempts:  maxAttempts,
+		RetryBase:    retryBase,
+		RetryMax:     retryMax,
 	}, nil
 }
 

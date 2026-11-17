@@ -30,16 +30,32 @@ Key requirements:
 
 1. Client uploads CSV via `POST /v1/reconciliation/settlement-files` (multipart)
 2. Server computes SHA-256 and checks for duplicates (409 if exists)
-3. Server parses CSV and batch-inserts `settlement_records` (500 per batch via `COPY`)
+3. In one transaction, the server:
+   - takes `pg_advisory_xact_lock` on (provider, settlement_date), so imports for
+     the same provider and date are serialized and others are not blocked
+   - marks the active file for that provider and date as `superseded_by` the new
+     file (the FK is `DEFERRABLE INITIALLY DEFERRED`, so this runs before the INSERT)
+   - inserts the file row and streams `settlement_records` with one `COPY`
 4. Returns 201 with `SettlementFile` view
+
+A partial unique index (`provider, settlement_date WHERE superseded_by IS NULL`)
+is the backstop: there is never more than one active file per provider and date.
+A superseded file cannot get a new run (409 `file_superseded`); runs already
+created for it may still complete.
 
 ### Run Flow
 
 1. Client creates run via `POST /v1/reconciliation/runs` with `file_id` and an
    `Idempotency-Key`; a retry with the same key replays the first run
-2. Server inserts `reconciliation_runs` row with `status='running'`, returns 202
-3. Worker polls for a `running` run that no other worker has locked
-   (`FOR UPDATE SKIP LOCKED`; this pick holds no lock)
+2. Server inserts `reconciliation_runs` row with `status='running'`, returns 202.
+   A partial unique index allows only one `running` run per file; a second
+   request with a different key gets 409 `run_in_progress`
+3. Worker claims the `running` run with the earliest `next_attempt_at <= now()`
+   that no other worker has locked (`FOR UPDATE SKIP LOCKED`). The claim is one
+   committed `UPDATE` that increments `attempts` and pushes `next_attempt_at`
+   out by an exponential backoff (`RECONCILER_RETRY_BASE` doubled per attempt,
+   capped at `RECONCILER_RETRY_MAX`). A run past `RECONCILER_MAX_ATTEMPTS` is
+   marked `failed` instead of executed. The claim itself holds no lock
 4. Worker executes reconciliation in a single `REPEATABLE READ` transaction whose
    first statement locks the run row (`FOR UPDATE SKIP LOCKED`) until commit.
    If the row is locked or the run is no longer `running`, the worker skips it:
@@ -49,7 +65,8 @@ Key requirements:
    - Batch-inserts discrepancies (500 per batch via `COPY`)
    - Updates run status to `completed` with counts (only while still `running`)
 5. If worker crashes: the lock is released with its connection and the run
-   remains `running`, so another worker retries it
+   remains `running`. It is retried once its backoff expires, and it does not
+   block other runs in the meantime
 6. If reconciliation fails: run marked `failed` with error message (only while
    still `running`, so a late failure cannot overwrite a completed run)
 
@@ -60,6 +77,12 @@ Key requirements:
 - `amount_mismatch`: both exist, amounts differ (expected=ledger, actual=settlement)
 - `status_mismatch`: both exist, reversal status differs
 - `duplicate_in_settlement`: multiple settlement records with same `our_reference`
+- `duplicate_in_ledger`: multiple ledger transfers with the same `reference`
+- `currency_mismatch`: both exist, currencies differ (amounts are not compared)
+
+Settlement records with status `failed` do not count as paid: if every record
+for a reference failed but the ledger posted the transfer, it is a
+`status_mismatch`.
 
 ### Scope
 
@@ -67,6 +90,10 @@ Transfers in scope for a reconciliation run:
 - `created_at` within `[settlement_date 00:00 UTC, +1 day)`
 - `reference IS NOT NULL`
 - `type != 'reversal'`
+- `status = 'posted'`
+
+Scope is not filtered by provider, and the day boundary is UTC. ADR 0008
+proposes how to change both.
 
 Settlement records matched by `our_reference` (nullable). Records with
 `our_reference IS NULL` are flagged as `missing_in_ledger`.
@@ -76,8 +103,11 @@ Settlement records matched by `our_reference` (nullable). Records with
 - Multiple workers can run concurrently
 - A run is executed by at most one worker at a time: the run row lock is held
   for the whole execution transaction, and other workers skip locked runs
-- Advisory locks not used; row-level locking sufficient
-- Multiple runs per file allowed (no one-run-per-file constraint)
+- Run execution uses row locks only. Imports use a transaction-scoped advisory
+  lock per (provider, settlement_date); without it, N concurrent imports would
+  need N retries on the one-active-file index
+- At most one active run per file; a file can be reconciled again once its
+  previous run finished
 
 ### Streaming
 
@@ -93,14 +123,17 @@ Settlement records matched by `our_reference` (nullable). Records with
 - At most once per run: concurrent workers cannot both record discrepancies for
   one run; comparison output is deterministic (references are compared in sorted order)
 - Scalable: batch inserts handle large files efficiently
-- Flexible: multiple runs per file allow re-processing after corrections
+- Flexible: a file can be re-run after its previous run finished, and a
+  corrected file supersedes the old one instead of being reconciled beside it
+- Bounded retries: a poison run fails after `RECONCILER_MAX_ATTEMPTS` claims and
+  waits out its backoff between attempts instead of blocking the queue
 
 ### Negative
 
 - Full settlement load: if files exceed memory, need to implement streaming comparison
-- No lease or attempt counter yet: a run that crashes the worker (e.g. OOM on a
-  very large file) stays `running` and is retried forever at the head of the
-  queue. Needs a schema change (attempts / lease columns).
+- An attempt is counted at claim time, so a worker that claims a run and then
+  loses the race to execute it (rare) uses up one attempt
+- A run whose worker died waits for its backoff (default 30s) before retrying
 - The run row stays locked for the whole run, so very large runs hold a long
   `REPEATABLE READ` snapshot (delays vacuum).
 

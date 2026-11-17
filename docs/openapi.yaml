@@ -474,7 +474,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/SettlementFile'
         '409':
-          description: File yang sama (sha256) sudah pernah diimpor
+          description: >-
+            File yang sama (sha256) sudah pernah diimpor. File lain untuk provider dan
+            settlement_date yang sama TIDAK ditolak: file baru menggantikan (supersede) file lama
           content:
             application/problem+json:
               schema:
@@ -537,6 +539,16 @@ paths:
                 $ref: '#/components/schemas/ReconciliationRun'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            Masih ada run yang berjalan untuk file ini (`run_in_progress`), file sudah
+            digantikan file koreksi (`file_superseded`), atau Idempotency-Key masih diproses
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
 
   /v1/reconciliation/runs/{runId}:
     get:
@@ -871,6 +883,11 @@ components:
         settlement_date: { type: string, format: date }
         record_count: { type: integer }
         imported_at: { type: string, format: date-time }
+        superseded_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: File koreksi yang menggantikan file ini; file yang sudah digantikan tidak bisa direkonsiliasi lagi
 
     ReconciliationRun:
       type: object
@@ -884,6 +901,9 @@ components:
         matched_count: { type: integer }
         discrepancy_count: { type: integer }
         error: { type: string, nullable: true }
+        attempts:
+          type: integer
+          description: Berapa kali run diambil worker; run gagal permanen setelah batas percobaan
 
     Discrepancy:
       type: object
@@ -893,7 +913,7 @@ components:
         run_id: { type: string, format: uuid }
         kind:
           type: string
-          enum: [missing_in_ledger, missing_in_settlement, amount_mismatch, status_mismatch, duplicate_in_settlement]
+          enum: [missing_in_ledger, missing_in_settlement, amount_mismatch, status_mismatch, duplicate_in_settlement, duplicate_in_ledger, currency_mismatch]
         transfer_id: { type: string, format: uuid, nullable: true }
         settlement_record_id: { type: integer, format: int64, nullable: true }
         expected_amount: { type: integer, format: int64, nullable: true }

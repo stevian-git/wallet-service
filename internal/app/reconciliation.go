@@ -119,6 +119,7 @@ func reconciliationRunView(run reconciliation.ReconciliationRun) ReconciliationR
 		MatchedCount:     run.MatchedCount,
 		DiscrepancyCount: run.DiscrepancyCount,
 		Error:            run.Error,
+		Attempts:         run.Attempts,
 	}
 }
 
@@ -145,5 +146,6 @@ func settlementFileView(f reconciliation.SettlementFile) SettlementFileView {
 		SettlementDate: f.SettlementDate.Format(dateLayout),
 		RecordCount:    f.RecordCount,
 		ImportedAt:     f.ImportedAt,
+		SupersededBy:   f.SupersededBy,
 	}
 }

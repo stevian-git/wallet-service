@@ -64,4 +64,20 @@ func TestCreateReconciliationRunIsIdempotent(t *testing.T) {
 
 	missingKey := client.request(http.MethodPost, "/v1/reconciliation/runs", body, "", true)
 	assertProblem(t, missingKey, http.StatusUnprocessableEntity, "validation_failed")
+
+	// A new key for a file whose run is still running is rejected, not queued twice.
+	inProgress := client.request(http.MethodPost, "/v1/reconciliation/runs", body, "run-key-2", true)
+	assertProblem(t, inProgress, http.StatusConflict, "run_in_progress")
+
+	// After a corrected file is imported, the old one can no longer be reconciled.
+	if _, err := recon.Import(ctx, reconciliation.ImportInput{
+		Provider: "p", FileName: "f-corrected.csv",
+		FileContent: []byte("provider_ref,our_reference,amount,currency,status,occurred_at\n" +
+			"prov-1,ref-a,150,IDR,success,2026-10-26T10:00:00Z\n"),
+		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("import corrected file: %v", err)
+	}
+	superseded := client.request(http.MethodPost, "/v1/reconciliation/runs", body, "run-key-3", true)
+	assertProblem(t, superseded, http.StatusConflict, "file_superseded")
 }

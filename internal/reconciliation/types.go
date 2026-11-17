@@ -14,6 +14,8 @@ const (
 	DiscrepancyAmountMismatch        DiscrepancyKind = "amount_mismatch"
 	DiscrepancyStatusMismatch        DiscrepancyKind = "status_mismatch"
 	DiscrepancyDuplicateInSettlement DiscrepancyKind = "duplicate_in_settlement"
+	DiscrepancyDuplicateInLedger     DiscrepancyKind = "duplicate_in_ledger"
+	DiscrepancyCurrencyMismatch      DiscrepancyKind = "currency_mismatch"
 )
 
 type RunStatus string
@@ -32,6 +34,9 @@ type SettlementFile struct {
 	SettlementDate time.Time
 	RecordCount    int
 	ImportedAt     time.Time
+	// SupersededBy is set once a newer file for the same provider and
+	// settlement date is imported; superseded files cannot be reconciled again.
+	SupersededBy *uuid.UUID
 }
 
 type SettlementRecord struct {
@@ -54,6 +59,17 @@ type ReconciliationRun struct {
 	MatchedCount     int
 	DiscrepancyCount int
 	Error            *string
+	// Attempts counts claims by a worker; NextAttemptAt is when a run whose
+	// worker died becomes claimable again.
+	Attempts      int
+	NextAttemptAt time.Time
+}
+
+// RetryPolicy bounds how often a run is retried after its worker dies.
+type RetryPolicy struct {
+	MaxAttempts int
+	Base        time.Duration // backoff after the first attempt, doubled per attempt
+	Max         time.Duration // backoff cap
 }
 
 type Discrepancy struct {

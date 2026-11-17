@@ -52,10 +52,16 @@ func main() {
 	recon := reconciliation.NewService(pool)
 	reconciler := recon.Reconciler()
 
-	logger.Info("reconciler worker started", "poll_interval", cfg.PollInterval)
+	retry := reconciliation.RetryPolicy{
+		MaxAttempts: cfg.MaxAttempts,
+		Base:        cfg.RetryBase,
+		Max:         cfg.RetryMax,
+	}
+	logger.Info("reconciler worker started",
+		"poll_interval", cfg.PollInterval, "max_attempts", retry.MaxAttempts, "retry_base", retry.Base)
 
 	for {
-		run, err := reconciler.ClaimRun(ctx)
+		run, err := reconciler.ClaimRun(ctx, retry)
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Error("claim run", "error", err)
@@ -72,7 +78,7 @@ func main() {
 			continue
 		}
 
-		logger.Info("claimed reconciliation run", "run_id", run.ID, "file_id", run.FileID)
+		logger.Info("claimed reconciliation run", "run_id", run.ID, "file_id", run.FileID, "attempt", run.Attempts)
 
 		if err := reconciler.Execute(ctx, *run); err != nil {
 			switch {
