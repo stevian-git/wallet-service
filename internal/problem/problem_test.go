@@ -29,6 +29,7 @@ func TestFromMapsDomainErrors(t *testing.T) {
 		{"run not found", reconciliation.ErrRunNotFound, http.StatusNotFound, "not_found", "Not found", "reconciliation run not found"},
 		{"file not found", reconciliation.ErrFileNotFound, http.StatusNotFound, "not_found", "Not found", "settlement file not found"},
 		{"duplicate file", reconciliation.ErrDuplicateFile, http.StatusConflict, "duplicate_file", "Duplicate file", "settlement file with same sha256 already exists"},
+		{"invalid settlement file", fmt.Errorf("%w: row 3: bad amount", reconciliation.ErrInvalidSettlementFile), http.StatusUnprocessableEntity, "validation_failed", "Validation failed", "invalid settlement file: row 3: bad amount"},
 		{"run in progress", reconciliation.ErrRunInProgress, http.StatusConflict, "run_in_progress", "Reconciliation run in progress", "a reconciliation run for this file is already in progress"},
 		{"file superseded", reconciliation.ErrFileSuperseded, http.StatusConflict, "file_superseded", "Settlement file superseded", "settlement file has been superseded by a newer file"},
 		{"unknown", errors.New("boom"), http.StatusInternalServerError, "", "Internal server error", ""},

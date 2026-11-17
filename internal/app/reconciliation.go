@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"time"
 
@@ -11,14 +12,16 @@ import (
 	"github.com/stevians/wallet-service/internal/reconciliation"
 )
 
-func (s *Service) ImportSettlementFile(ctx context.Context, provider, fileName string, content []byte, settlementDate string) (SettlementFileView, error) {
+// ImportSettlementFile imports a CSV that is read twice (validate, then COPY),
+// so content must be seekable; an uploaded multipart file is.
+func (s *Service) ImportSettlementFile(ctx context.Context, provider, fileName string, content io.ReadSeeker, settlementDate string) (SettlementFileView, error) {
 	if provider == "" {
 		return SettlementFileView{}, validationError("provider is required")
 	}
 	if fileName == "" {
 		return SettlementFileView{}, validationError("file_name is required")
 	}
-	if len(content) == 0 {
+	if content == nil {
 		return SettlementFileView{}, validationError("file is required")
 	}
 
@@ -30,7 +33,7 @@ func (s *Service) ImportSettlementFile(ctx context.Context, provider, fileName s
 	file, err := s.recon.Import(ctx, reconciliation.ImportInput{
 		Provider:       provider,
 		FileName:       fileName,
-		FileContent:    content,
+		Content:        content,
 		SettlementDate: parsedDate,
 	})
 	if err != nil {

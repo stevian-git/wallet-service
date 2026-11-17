@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/stevians/wallet-service/internal/ledger"
 	"github.com/stevians/wallet-service/internal/testutil"
 )
 
@@ -29,7 +31,7 @@ prov-003,,5000,IDR,success,2026-10-26T12:00:00Z
 	file, err := imp.Import(ctx, ImportInput{
 		Provider:       "mock_bank_a",
 		FileName:       "test_settlement.csv",
-		FileContent:    []byte(csv),
+		Content:        strings.NewReader(csv),
 		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -64,7 +66,7 @@ prov-001,ref-001,10000,IDR,success,2026-10-26T10:00:00Z
 	input := ImportInput{
 		Provider:       "mock_bank_a",
 		FileName:       "test_settlement.csv",
-		FileContent:    []byte(csv),
+		Content:        strings.NewReader(csv),
 		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 	}
 
@@ -225,7 +227,7 @@ prov-%[1]d-2,ref-%[1]d-b,200,IDR,success,2026-10-26T10:00:00Z
 prov-%[1]d-3,ref-%[1]d-c,300,IDR,success,2026-10-26T10:00:00Z
 `, i)
 		file, err := svc.Import(ctx, ImportInput{
-			Provider: fmt.Sprintf("p%d", i), FileName: "f.csv", FileContent: []byte(csv),
+			Provider: fmt.Sprintf("p%d", i), FileName: "f.csv", Content: strings.NewReader(csv),
 			SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 		})
 		if err != nil {
@@ -306,7 +308,7 @@ prov-2,ref-b,200,IDR,success,2026-10-26T10:00:00Z
 prov-3,ref-c,300,IDR,success,2026-10-26T10:00:00Z
 `
 	file, err := svc.Import(ctx, ImportInput{
-		Provider: "p", FileName: "f.csv", FileContent: []byte(csv),
+		Provider: "p", FileName: "f.csv", Content: strings.NewReader(csv),
 		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -434,7 +436,7 @@ func importCSV(t *testing.T, svc *Service, provider, date string, rows ...string
 	}
 	content := "provider_ref,our_reference,amount,currency,status,occurred_at\n" + strings.Join(rows, "\n") + "\n"
 	file, err := svc.Import(context.Background(), ImportInput{
-		Provider: provider, FileName: "f.csv", FileContent: []byte(content), SettlementDate: d,
+		Provider: provider, FileName: "f.csv", Content: strings.NewReader(content), SettlementDate: d,
 	})
 	if err != nil {
 		t.Fatalf("import: %v", err)
@@ -490,7 +492,7 @@ func TestConcurrentImportsLeaveOneActiveFile(t *testing.T) {
 			<-start
 			content := fmt.Sprintf("provider_ref,our_reference,amount,currency,status,occurred_at\nprov-%d,ref-1,100,IDR,success,2026-10-26T10:00:00Z\n", i)
 			_, err := svc.Import(ctx, ImportInput{
-				Provider: "bank_a", FileName: "f.csv", FileContent: []byte(content),
+				Provider: "bank_a", FileName: "f.csv", Content: strings.NewReader(content),
 				SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 			})
 			errs <- err
@@ -614,5 +616,184 @@ func TestCompareDuplicateInLedger(t *testing.T) {
 
 	if len(discrepancies) != 1 || discrepancies[0].Kind != DiscrepancyDuplicateInLedger {
 		t.Fatalf("discrepancies = %+v, want one duplicate_in_ledger", discrepancies)
+	}
+}
+
+// TestExecuteStreamingMatchesInMemoryCompare runs a file larger than several
+// cursor batches through Execute and checks that the streamed merge-join
+// records exactly what the in-memory compare computes from the same rows.
+// References mix case, digits and non-ASCII so a collation mismatch between
+// Postgres ordering and Go string order would break the merge.
+func TestExecuteStreamingMatchesInMemoryCompare(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	book := ledger.New(pg.Pool)
+	ctx := context.Background()
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+
+	// Ledger side: real topups, including duplicate references.
+	tx, err := pg.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	account, err := book.CreateAccount(ctx, tx, ledger.CreateAccountInput{OwnerRef: "stream-test", Kind: ledger.AccountKindUserWallet, Currency: "IDR"})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	ledgerRefs := []string{"Zeta", "alpha", "Ärger", "ä", "a-10", "a-9", "ref_ä", "ref-0007", "ref-0007", "ref-1500", "only-ledger", "B", "b"}
+	for i, ref := range ledgerRefs {
+		ref := ref
+		if _, err := book.Topup(ctx, tx, ledger.TopupInput{
+			DestinationAccountID: account.ID, Amount: int64(100 + i), Currency: "IDR", Reference: &ref,
+		}); err != nil {
+			t.Fatalf("topup %q: %v", ref, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Settlement side: > 2 cursor batches, interleaving with the ledger refs.
+	var rows []string
+	for i := 0; i < 2*cursorFetchSize+500; i++ {
+		rows = append(rows, fmt.Sprintf("p-%d,ref-%04d,%d,IDR,success,2026-10-26T10:00:00Z", i, i, 100+i%7))
+	}
+	rows = append(rows,
+		"p-x1,Zeta,100,IDR,success,2026-10-26T10:00:00Z",
+		"p-x2,alpha,999,IDR,success,2026-10-26T10:00:00Z",
+		"p-x3,Ärger,102,USD,success,2026-10-26T10:00:00Z",
+		"p-x4,ä,103,IDR,failed,2026-10-26T10:00:00Z",
+		"p-x5,a-10,104,IDR,reversed,2026-10-26T10:00:00Z",
+		"p-x6,a-9,105,IDR,success,2026-10-26T10:00:00Z",
+		"p-x7,a-9,0001,IDR,success,2026-10-26T10:00:00Z",
+		"p-x8,,50,IDR,success,2026-10-26T10:00:00Z",
+		"p-x9,,60,IDR,success,2026-10-26T10:00:00Z",
+		"p-x10,B,111,IDR,success,2026-10-26T10:00:00Z",
+	)
+	file := importCSV(t, svc, "bank_stream", today.Format(time.DateOnly), rows...)
+
+	run, err := svc.CreateRun(ctx, CreateRunInput{FileID: file.ID})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if err := svc.Reconciler().Execute(ctx, run); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	// Expected: the in-memory compare over the same rows, loaded unordered-ish.
+	srows, err := pg.Pool.Query(ctx, `
+		SELECT id, file_id, provider_ref, our_reference, amount, currency, status, occurred_at
+		  FROM settlement_records WHERE file_id = $1 ORDER BY id DESC`, file.ID)
+	if err != nil {
+		t.Fatalf("load settlements: %v", err)
+	}
+	settlements, err := pgx.CollectRows(srows, scanSettlementRecord)
+	if err != nil {
+		t.Fatalf("scan settlements: %v", err)
+	}
+	trows, err := pg.Pool.Query(ctx, `
+		SELECT t.id, t.reference, t.amount, t.currency, t.status, false
+		  FROM transfers t
+		 WHERE t.reference IS NOT NULL AND t.type != 'reversal' AND t.status = 'posted'
+		   AND t.created_at >= $1 AND t.created_at < $2
+		 ORDER BY t.created_at, t.id`, today, today.Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("load transfers: %v", err)
+	}
+	transfers, err := pgx.CollectRows(trows, scanTransferRow)
+	if err != nil {
+		t.Fatalf("scan transfers: %v", err)
+	}
+	want, wantMatched := compare(settlements, transfers)
+
+	got, err := svc.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.MatchedCount != wantMatched || got.DiscrepancyCount != len(want) {
+		t.Fatalf("run matched=%d discrepancies=%d, want matched=%d discrepancies=%d",
+			got.MatchedCount, got.DiscrepancyCount, wantMatched, len(want))
+	}
+
+	drows, err := pg.Pool.Query(ctx, `
+		SELECT kind, transfer_id, settlement_record_id, expected_amount, actual_amount, note
+		  FROM reconciliation_discrepancies WHERE run_id = $1 ORDER BY id`, run.ID)
+	if err != nil {
+		t.Fatalf("load discrepancies: %v", err)
+	}
+	stored, err := pgx.CollectRows(drows, func(row pgx.CollectableRow) (Discrepancy, error) {
+		var d Discrepancy
+		err := row.Scan(&d.Kind, &d.TransferID, &d.SettlementRecordID, &d.ExpectedAmount, &d.ActualAmount, &d.Note)
+		d.Resolution = resolutionOpen
+		return d, err
+	})
+	if err != nil {
+		t.Fatalf("scan discrepancies: %v", err)
+	}
+	if !reflect.DeepEqual(stored, want) {
+		for i := range min(len(stored), len(want)) {
+			if !reflect.DeepEqual(stored[i], want[i]) {
+				t.Fatalf("discrepancy %d differs:\n got  %+v\n want %+v", i, stored[i], want[i])
+			}
+		}
+		t.Fatalf("stored %d discrepancies, want %d", len(stored), len(want))
+	}
+
+	// Sanity: the scenario exercises every kind of path.
+	kinds := map[DiscrepancyKind]int{}
+	for _, d := range want {
+		kinds[d.Kind]++
+	}
+	for _, k := range []DiscrepancyKind{DiscrepancyMissingInLedger, DiscrepancyMissingInSettlement,
+		DiscrepancyAmountMismatch, DiscrepancyCurrencyMismatch, DiscrepancyStatusMismatch,
+		DiscrepancyDuplicateInSettlement, DiscrepancyDuplicateInLedger} {
+		if kinds[k] == 0 {
+			t.Errorf("scenario produced no %s discrepancy", k)
+		}
+	}
+}
+
+func TestImportRejectsInvalidFileWithoutWriting(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	svc := NewService(pg.Pool)
+	ctx := context.Background()
+
+	var b strings.Builder
+	b.WriteString("provider_ref,our_reference,amount,currency,status,occurred_at\n")
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&b, "p-%d,ref-%d,100,IDR,success,2026-10-26T10:00:00Z\n", i, i)
+	}
+	b.WriteString("p-bad,ref-bad,not-a-number,IDR,success,2026-10-26T10:00:00Z\n")
+
+	cases := map[string]string{
+		"bad last row": b.String(),
+		"empty file":   "",
+		"header only":  "provider_ref,our_reference,amount,currency,status,occurred_at\n",
+		"bad header":   "a,b,c,d,e,f\n",
+		"short row":    "provider_ref,our_reference,amount,currency,status,occurred_at\np-1,ref-1,100\n",
+	}
+	for name, content := range cases {
+		_, err := svc.Import(ctx, ImportInput{
+			Provider: "bank_a", FileName: "f.csv", Content: strings.NewReader(content),
+			SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
+		})
+		if !errors.Is(err, ErrInvalidSettlementFile) {
+			t.Errorf("%s: err = %v, want ErrInvalidSettlementFile", name, err)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(func() error {
+		_, err := svc.Import(ctx, ImportInput{Provider: "bank_a", FileName: "f.csv", Content: strings.NewReader(b.String()),
+			SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)})
+		return err
+	}()), "row 5001") {
+		t.Error("error for the bad row should name row 5001")
+	}
+
+	var files, records int
+	if err := pg.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM settlement_files), (SELECT count(*) FROM settlement_records)`).Scan(&files, &records); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if files != 0 || records != 0 {
+		t.Fatalf("files=%d records=%d after rejected imports, want 0/0", files, records)
 	}
 }

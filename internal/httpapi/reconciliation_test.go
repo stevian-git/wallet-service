@@ -1,10 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +30,7 @@ func TestCreateReconciliationRunIsIdempotent(t *testing.T) {
 
 	file, err := recon.Import(ctx, reconciliation.ImportInput{
 		Provider: "p", FileName: "f.csv",
-		FileContent: []byte("provider_ref,our_reference,amount,currency,status,occurred_at\n" +
+		Content: strings.NewReader("provider_ref,our_reference,amount,currency,status,occurred_at\n" +
 			"prov-1,ref-a,100,IDR,success,2026-10-26T10:00:00Z\n"),
 		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 	})
@@ -72,7 +76,7 @@ func TestCreateReconciliationRunIsIdempotent(t *testing.T) {
 	// After a corrected file is imported, the old one can no longer be reconciled.
 	if _, err := recon.Import(ctx, reconciliation.ImportInput{
 		Provider: "p", FileName: "f-corrected.csv",
-		FileContent: []byte("provider_ref,our_reference,amount,currency,status,occurred_at\n" +
+		Content: strings.NewReader("provider_ref,our_reference,amount,currency,status,occurred_at\n" +
 			"prov-1,ref-a,150,IDR,success,2026-10-26T10:00:00Z\n"),
 		SettlementDate: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
 	}); err != nil {
@@ -80,4 +84,54 @@ func TestCreateReconciliationRunIsIdempotent(t *testing.T) {
 	}
 	superseded := client.request(http.MethodPost, "/v1/reconciliation/runs", body, "run-key-3", true)
 	assertProblem(t, superseded, http.StatusConflict, "file_superseded")
+}
+
+// TestImportSettlementFileHTTP uploads through multipart: a valid file larger
+// than the in-memory form limit is accepted (spooled to disk), and an invalid
+// CSV is a 422, not a 500.
+func TestImportSettlementFileHTTP(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second), reconciliation.NewService(pg.Pool))
+	server := New(service, logger, testAPIKey, pg.Pool.Ping)
+	handler := server.Handler()
+
+	upload := func(provider, content string) *httptest.ResponseRecorder {
+		t.Helper()
+		var body bytes.Buffer
+		form := multipart.NewWriter(&body)
+		_ = form.WriteField("provider", provider)
+		_ = form.WriteField("settlement_date", "2026-10-26")
+		part, err := form.CreateFormFile("file", "settlement.csv")
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		_, _ = io.WriteString(part, content)
+		_ = form.Close()
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/reconciliation/settlement-files", &body)
+		req.Header.Set("Content-Type", form.FormDataContentType())
+		req.Header.Set("X-API-Key", testAPIKey)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	var big strings.Builder
+	big.WriteString("provider_ref,our_reference,amount,currency,status,occurred_at\n")
+	for i := 0; big.Len() < 2*maxSettlementFormMemory; i++ {
+		big.WriteString("p-" + strings.Repeat("x", 8) + "-" + time.Duration(i).String() + ",ref,100,IDR,success,2026-10-26T10:00:00Z\n")
+	}
+	ok := upload("bank_big", big.String())
+	if ok.Code != http.StatusCreated {
+		t.Fatalf("large valid upload: status = %d, body = %s", ok.Code, ok.Body.String())
+	}
+	var file app.SettlementFileView
+	decode(t, ok, &file)
+	if want := strings.Count(big.String(), "\n") - 1; file.RecordCount != want {
+		t.Fatalf("record_count = %d, want %d", file.RecordCount, want)
+	}
+
+	bad := upload("bank_bad", "provider_ref,our_reference,amount,currency,status,occurred_at\np-1,ref-1,abc,IDR,success,2026-10-26T10:00:00Z\n")
+	assertProblem(t, bad, http.StatusUnprocessableEntity, "validation_failed")
 }
