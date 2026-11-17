@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"io"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -9,12 +8,17 @@ import (
 	"github.com/stevians/wallet-service/internal/problem"
 )
 
-const maxSettlementFileSize = 256 << 20
+const (
+	maxSettlementFileSize = 256 << 20
+	// Multipart parts beyond this many bytes are spooled to a temp file (which
+	// net/http removes after the request), so an upload never sits in memory.
+	maxSettlementFormMemory = 1 << 20
+)
 
 func (s *Server) handleImportSettlementFile(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSettlementFileSize)
 
-	if err := r.ParseMultipartForm(maxSettlementFileSize); err != nil {
+	if err := r.ParseMultipartForm(maxSettlementFormMemory); err != nil {
 		s.writeProblem(w, r, &problem.Error{
 			Status: http.StatusRequestEntityTooLarge,
 			Title:  "Payload too large",
@@ -34,13 +38,7 @@ func (s *Server) handleImportSettlementFile(w http.ResponseWriter, r *http.Reque
 	}
 	defer file.Close()
 
-	content, err := io.ReadAll(file)
-	if err != nil {
-		s.writeProblem(w, r, validationError("could not read file"))
-		return
-	}
-
-	view, err := s.app.ImportSettlementFile(r.Context(), provider, header.Filename, content, settlementDate)
+	view, err := s.app.ImportSettlementFile(r.Context(), provider, header.Filename, file, settlementDate)
 	if err != nil {
 		s.writeProblem(w, r, err)
 		return

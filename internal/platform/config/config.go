@@ -157,6 +157,7 @@ type ReconcilerConfig struct {
 	MaxAttempts  int           // claims per run before it is marked failed
 	RetryBase    time.Duration // backoff before retrying a run whose worker died
 	RetryMax     time.Duration // backoff cap
+	RunTimeout   time.Duration // a run (one transaction) longer than this is failed
 }
 
 func LoadReconciler() (ReconcilerConfig, error) {
@@ -184,6 +185,10 @@ func LoadReconciler() (ReconcilerConfig, error) {
 	if err != nil {
 		return ReconcilerConfig{}, err
 	}
+	runTimeout, err := envPositiveDuration("RECONCILER_RUN_TIMEOUT", 30*time.Minute)
+	if err != nil {
+		return ReconcilerConfig{}, err
+	}
 	return ReconcilerConfig{
 		DatabaseURL:  databaseURL,
 		LogLevel:     level,
@@ -191,6 +196,7 @@ func LoadReconciler() (ReconcilerConfig, error) {
 		MaxAttempts:  maxAttempts,
 		RetryBase:    retryBase,
 		RetryMax:     retryMax,
+		RunTimeout:   runTimeout,
 	}, nil
 }
 

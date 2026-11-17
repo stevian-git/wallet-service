@@ -111,9 +111,46 @@ Settlement records matched by `our_reference` (nullable). Records with
 
 ### Streaming
 
-- Settlement records loaded in full for the file (acceptable for typical file sizes)
-- Transfers loaded via keyset pagination if needed (not yet implemented)
-- Discrepancies inserted in batches of 500 via `pgx.CopyFrom`
+Memory is bounded independently of file size. Measured on a 1M-row (83 MB)
+file:
+
+| | Peak RSS before | Peak RSS after | Time before | Time after |
+|---|---|---|---|---|
+| Import (API) | 713 MiB | 31 MiB | ~7s | ~6s |
+| Run (reconciler) | 1099 MiB | 27 MiB | ~11s | ~14.5s |
+
+The run is ~3s slower. Postgres now sorts the file's records by
+`our_reference COLLATE "C"` instead of reading them in primary-key order. The
+cursor fetch size does not change this: 1000 and 5000 measure the same. An
+index on `settlement_records (file_id, our_reference COLLATE "C", id)` would
+remove the sort, at the cost of a slower import and a migration. It has not
+been added.
+
+- **Import** reads the upload twice and never buffers it. The multipart part is
+  spooled to a temp file (1 MiB form memory).
+  - The first pass validates every row, counts them, and hashes the bytes. The
+    `settlement_files` row (sha256, record_count) must exist before its
+    records, and a bad row is reported (422) before the database is touched.
+  - The second pass rewinds and streams rows into `COPY` via a
+    `pgx.CopyFromSource`.
+- **Execute** declares two server-side cursors in the run's `REPEATABLE READ`
+  transaction, `FETCH`es them 1000 rows at a time, and merge-joins them by
+  reference:
+  - `settlement_records ORDER BY our_reference COLLATE "C" NULLS LAST, id`
+  - in-scope `transfers ORDER BY reference COLLATE "C", created_at, id`
+- **Why `COLLATE "C"`:** it is byte order, the same as Go's string comparison.
+  The database default collation (glibc or ICU `en_US`) orders `b`/`B`/`ä`
+  differently, and a merge-join over a different order silently mismatches.
+  The in-memory `compare` used by tests runs the same merge over sorted
+  slices, and a test asserts that streamed and in-memory results are
+  identical.
+- **Memory** is one cursor batch per side, one reference group, and a
+  5000-row discrepancy batch, written with `COPY` as it fills.
+- **The trade-off kept:** one transaction per run, so the run sees one
+  consistent snapshot and is all-or-nothing. A long run therefore holds a
+  snapshot (delays vacuum). `RECONCILER_RUN_TIMEOUT` (default 30m) bounds it;
+  a run that exceeds it is marked `failed` instead of retried, since a retry
+  would time out again.
 
 ## Consequences
 
@@ -130,7 +167,6 @@ Settlement records matched by `our_reference` (nullable). Records with
 
 ### Negative
 
-- Full settlement load: if files exceed memory, need to implement streaming comparison
 - An attempt is counted at claim time, so a worker that claims a run and then
   loses the race to execute it (rare) uses up one attempt
 - A run whose worker died waits for its backoff (default 30s) before retrying
@@ -140,5 +176,8 @@ Settlement records matched by `our_reference` (nullable). Records with
 ### Neutral
 
 - Discrepancies are append-only per run; resolution (open/resolved/ignored) is separate
-- Reversal detection uses `EXISTS (SELECT 1 FROM transfers r WHERE r.reverses_transfer_id = t.id)`
-  which adds a subquery per transfer; acceptable for typical volumes
+- Reversal detection uses `EXISTS (SELECT 1 FROM transfers r WHERE r.reverses_transfer_id = t.id)`,
+  an index lookup per transfer on the unique `reverses_transfer_id`
+- Ordering by `COLLATE "C"` cannot use the default-collation index on
+  `transfers.reference`; Postgres sorts the day's scope (spilling to disk past
+  `work_mem`), which keeps the cost in the database instead of in worker memory

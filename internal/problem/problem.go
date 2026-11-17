@@ -62,6 +62,8 @@ func From(err error) *Error {
 	case errors.Is(err, reconciliation.ErrRunNotFound),
 		errors.Is(err, reconciliation.ErrFileNotFound):
 		return &Error{Status: http.StatusNotFound, Code: "not_found", Title: "Not found", Detail: err.Error()}
+	case errors.Is(err, reconciliation.ErrInvalidSettlementFile):
+		return &Error{Status: http.StatusUnprocessableEntity, Code: "validation_failed", Title: "Validation failed", Detail: err.Error()}
 	case errors.Is(err, reconciliation.ErrDuplicateFile):
 		return &Error{Status: http.StatusConflict, Code: "duplicate_file", Title: "Duplicate file", Detail: err.Error()}
 	case errors.Is(err, reconciliation.ErrRunInProgress):

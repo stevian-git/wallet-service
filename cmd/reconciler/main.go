@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -58,7 +59,8 @@ func main() {
 		Max:         cfg.RetryMax,
 	}
 	logger.Info("reconciler worker started",
-		"poll_interval", cfg.PollInterval, "max_attempts", retry.MaxAttempts, "retry_base", retry.Base)
+		"poll_interval", cfg.PollInterval, "max_attempts", retry.MaxAttempts, "retry_base", retry.Base,
+		"run_timeout", cfg.RunTimeout)
 
 	for {
 		run, err := reconciler.ClaimRun(ctx, retry)
@@ -80,7 +82,7 @@ func main() {
 
 		logger.Info("claimed reconciliation run", "run_id", run.ID, "file_id", run.FileID, "attempt", run.Attempts)
 
-		if err := reconciler.Execute(ctx, *run); err != nil {
+		if err := execute(ctx, reconciler, *run, cfg.RunTimeout); err != nil {
 			switch {
 			case errors.Is(err, ctx.Err()):
 				logger.Warn("reconciliation run interrupted, leaving status=running for retry",
@@ -98,6 +100,19 @@ func main() {
 		logger.Info("reconciliation run completed", "run_id", run.ID)
 	}
 	logger.Info("reconciler worker shutting down")
+}
+
+// execute bounds one run by timeout. The run is a single transaction that holds
+// a snapshot and the run row lock, so it must not be allowed to hang forever; a
+// run that is simply too large fails with a clear error instead of retrying.
+func execute(ctx context.Context, reconciler *reconciliation.Reconciler, run reconciliation.ReconciliationRun, timeout time.Duration) error {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := reconciler.Execute(runCtx, run)
+	if err != nil && ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("run exceeded RECONCILER_RUN_TIMEOUT (%s): %w", timeout, err)
+	}
+	return err
 }
 
 // markFailed records the failure even while shutting down, so a run that failed

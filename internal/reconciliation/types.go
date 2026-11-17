@@ -1,6 +1,7 @@
 package reconciliation
 
 import (
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -88,7 +89,7 @@ type Discrepancy struct {
 type ImportInput struct {
 	Provider       string
 	FileName       string
-	FileContent    []byte
+	Content        io.ReadSeeker // read twice: validate+hash, then COPY
 	SettlementDate time.Time
 }
 
