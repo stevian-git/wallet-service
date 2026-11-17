@@ -49,7 +49,7 @@ loadtest-hot:
 	BASE_URL='$(BASE_URL)' API_KEY='$(API_KEY)' VUS='$(VUS)' DURATION='$(DURATION)' HOT=1 k6 run deploy/k6/wallet.js
 
 chaos: build up
-	./scripts/chaos.sh
+	PGPASSWORD="$${PGPASSWORD:-app_dev_pw}" ./scripts/chaos.sh
 
 down:
 	docker compose down

@@ -34,6 +34,13 @@ LOAD_HOT="${LOAD_HOT:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The relay runs from the built binary, not `go run`: killing `go run` leaves
+# the compiled child running, so the relay-crash step would not happen.
+RELAY_BIN="${RELAY_BIN:-$ROOT_DIR/bin/relay}"
+if [[ ! -x "$RELAY_BIN" ]]; then
+  echo "relay binary not found at $RELAY_BIN (run make build)" >&2
+  exit 1
+fi
 
 RELAY_PID=""
 K6_PID=""
@@ -169,7 +176,7 @@ KAFKA_TOPIC="ledger.events.v1" \
 OUTBOX_BATCH_SIZE="50" \
 OUTBOX_POLL_INTERVAL="1s" \
 OUTBOX_MAX_BACKOFF="30s" \
-  go run -C "$ROOT_DIR" ./cmd/relay > "$RESULTS_DIR/relay.log" 2>&1 &
+  "$RELAY_BIN" > "$RESULTS_DIR/relay.log" 2>&1 &
 RELAY_PID=$!
 
 log "starting k6 load (duration=${LOAD_DURATION}s, vus=${LOAD_VUS}, hot=${LOAD_HOT})"
@@ -200,10 +207,14 @@ wait_for_kafka_healthy 60
 log "t+80s: kill relay"
 sleep 25  # total ~t+80s from start of chaos
 if kill -0 "$RELAY_PID" 2>/dev/null; then
-  kill "$RELAY_PID"
+  kill -9 "$RELAY_PID"
   wait "$RELAY_PID" 2>/dev/null || true
   RELAY_PID=""
-  log "relay killed"
+  if pgrep -f "$RELAY_BIN" >/dev/null; then
+    log "ERROR: a relay process is still running after the kill"
+    exit 1
+  fi
+  log "relay killed (SIGKILL)"
 else
   log "relay already exited"
 fi
@@ -216,7 +227,7 @@ KAFKA_TOPIC="ledger.events.v1" \
 OUTBOX_BATCH_SIZE="50" \
 OUTBOX_POLL_INTERVAL="1s" \
 OUTBOX_MAX_BACKOFF="30s" \
-  go run -C "$ROOT_DIR" ./cmd/relay >> "$RESULTS_DIR/relay.log" 2>&1 &
+  "$RELAY_BIN" >> "$RESULTS_DIR/relay.log" 2>&1 &
 RELAY_PID=$!
 
 # --- wait for k6 to finish --------------------------------------------------
