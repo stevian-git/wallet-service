@@ -132,14 +132,21 @@ curl -s -X POST http://localhost:8080/v1/reconciliation/settlement-files \
   -F 'file=@settlement.csv'
 ```
 
-Create a reconciliation run:
+Create a reconciliation run. `Idempotency-Key` is required: a retry with the
+same key returns the same run.
 
 ```bash
 curl -s -X POST http://localhost:8080/v1/reconciliation/runs \
   -H 'Content-Type: application/json' \
   -H 'X-API-Key: dev_api_key' \
+  -H 'Idempotency-Key: run-1' \
   -d '{"file_id":"FILE_ID"}'
 ```
+
+A file has at most one `running` run: a second run with a different key is
+`409 run_in_progress`. Importing a corrected file for the same provider and
+settlement date supersedes the previous one, and a run for the old file is
+`409 file_superseded`.
 
 The reconciler worker (`make reconciler`) polls for `running` runs, claims them,
 and processes them. Query discrepancies:
@@ -196,6 +203,10 @@ Environment variables (or input in the UI):
 
 - `VITE_API_URL` (default `http://localhost:8080`)
 - `VITE_API_KEY` (fallback: type in the API Key dialog)
+
+The API sends CORS headers only to origins listed in `CORS_ALLOWED_ORIGINS`
+(comma-separated, default `http://localhost:5173`; `*` allows any origin).
+Serving the dashboard from another origin requires adding it there.
 
 Pages:
 

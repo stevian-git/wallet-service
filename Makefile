@@ -8,6 +8,7 @@ KAFKA_PORT ?= 9092
 
 DATABASE_URL ?= postgres://ledger_app:app_dev_pw@localhost:$(POSTGRES_PORT)/wallet?sslmode=disable
 API_KEY ?= dev_api_key
+CORS_ALLOWED_ORIGINS ?= http://localhost:5173
 MIGRATE_DATABASE_URL ?= pgx5://ledger_migrator:migrator_dev_pw@localhost:$(POSTGRES_PORT)/wallet?sslmode=disable&default_query_exec_mode=simple_protocol
 KAFKA_BROKERS ?= localhost:$(KAFKA_PORT)
 KAFKA_TOPIC ?= ledger.events.v1
@@ -69,7 +70,7 @@ test:
 	go test ./... -count=1
 
 run: up-db
-	DATABASE_URL='$(DATABASE_URL)' API_KEY='$(API_KEY)' go run ./cmd/api
+	DATABASE_URL='$(DATABASE_URL)' API_KEY='$(API_KEY)' CORS_ALLOWED_ORIGINS='$(CORS_ALLOWED_ORIGINS)' go run ./cmd/api
 
 relay: up
 	DATABASE_URL='$(DATABASE_URL)' KAFKA_BROKERS='$(KAFKA_BROKERS)' KAFKA_TOPIC='$(KAFKA_TOPIC)' \

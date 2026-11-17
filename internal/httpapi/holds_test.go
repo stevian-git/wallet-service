@@ -21,7 +21,7 @@ func TestHoldsHTTPAPI(t *testing.T) {
 	pg := testutil.NewPostgres(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second), reconciliation.NewService(pg.Pool))
-	server := New(service, logger, testAPIKey, pg.Pool.Ping)
+	server := New(service, logger, testAPIKey, nil, pg.Pool.Ping)
 	client := &apiClient{t: t, handler: server.Handler()}
 
 	accountA := client.createAccount("hold-http-a", "hold-create-a", http.StatusCreated)

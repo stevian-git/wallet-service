@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/stevians/wallet-service/internal/ledger"
+	"github.com/stevians/wallet-service/internal/pagination"
 	"github.com/stevians/wallet-service/internal/reconciliation"
 )
 
@@ -58,6 +59,8 @@ func From(err error) *Error {
 	case errors.Is(err, ledger.ErrInvalidAmount),
 		errors.Is(err, ledger.ErrInvalidPosting),
 		errors.Is(err, ledger.ErrUnbalancedEntries):
+		return &Error{Status: http.StatusUnprocessableEntity, Code: "validation_failed", Title: "Validation failed", Detail: err.Error()}
+	case errors.Is(err, pagination.ErrInvalidCursor):
 		return &Error{Status: http.StatusUnprocessableEntity, Code: "validation_failed", Title: "Validation failed", Detail: err.Error()}
 	case errors.Is(err, reconciliation.ErrRunNotFound),
 		errors.Is(err, reconciliation.ErrFileNotFound):

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/stevians/wallet-service/internal/app"
 	"github.com/stevians/wallet-service/internal/idempotency"
 	"github.com/stevians/wallet-service/internal/ledger"
@@ -24,7 +26,7 @@ func TestCreateReconciliationRunIsIdempotent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	recon := reconciliation.NewService(pg.Pool)
 	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second), recon)
-	server := New(service, logger, testAPIKey, pg.Pool.Ping)
+	server := New(service, logger, testAPIKey, nil, pg.Pool.Ping)
 	client := &apiClient{t: t, handler: server.Handler()}
 	ctx := context.Background()
 
@@ -93,7 +95,7 @@ func TestImportSettlementFileHTTP(t *testing.T) {
 	pg := testutil.NewPostgres(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second), reconciliation.NewService(pg.Pool))
-	server := New(service, logger, testAPIKey, pg.Pool.Ping)
+	server := New(service, logger, testAPIKey, nil, pg.Pool.Ping)
 	handler := server.Handler()
 
 	upload := func(provider, content string) *httptest.ResponseRecorder {
@@ -134,4 +136,25 @@ func TestImportSettlementFileHTTP(t *testing.T) {
 
 	bad := upload("bank_bad", "provider_ref,our_reference,amount,currency,status,occurred_at\np-1,ref-1,abc,IDR,success,2026-10-26T10:00:00Z\n")
 	assertProblem(t, bad, http.StatusUnprocessableEntity, "validation_failed")
+}
+
+// TestReconciliationListsRejectInvalidCursor: a malformed cursor is a client
+// error (422), not a 500.
+func TestReconciliationListsRejectInvalidCursor(t *testing.T) {
+	pg := testutil.NewPostgres(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := app.New(ledger.New(pg.Pool), idempotency.New(pg.Pool, 5*time.Second), reconciliation.NewService(pg.Pool))
+	server := New(service, logger, testAPIKey, nil, pg.Pool.Ping)
+	client := &apiClient{t: t, handler: server.Handler()}
+
+	for _, path := range []string{
+		"/v1/reconciliation/runs?cursor=not-a-cursor",
+		"/v1/reconciliation/settlement-files?cursor=not-a-cursor",
+		"/v1/reconciliation/runs/" + uuid.NewString() + "/discrepancies?cursor=not-a-cursor",
+	} {
+		t.Run(path, func(t *testing.T) {
+			res := client.request(http.MethodGet, path, nil, "", true)
+			assertProblem(t, res, http.StatusUnprocessableEntity, "validation_failed")
+		})
+	}
 }

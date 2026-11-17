@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stevians/wallet-service/internal/ledger"
+	"github.com/stevians/wallet-service/internal/pagination"
 	"github.com/stevians/wallet-service/internal/reconciliation"
 )
 
@@ -32,6 +33,7 @@ func TestFromMapsDomainErrors(t *testing.T) {
 		{"invalid settlement file", fmt.Errorf("%w: row 3: bad amount", reconciliation.ErrInvalidSettlementFile), http.StatusUnprocessableEntity, "validation_failed", "Validation failed", "invalid settlement file: row 3: bad amount"},
 		{"run in progress", reconciliation.ErrRunInProgress, http.StatusConflict, "run_in_progress", "Reconciliation run in progress", "a reconciliation run for this file is already in progress"},
 		{"file superseded", reconciliation.ErrFileSuperseded, http.StatusConflict, "file_superseded", "Settlement file superseded", "settlement file has been superseded by a newer file"},
+		{"invalid cursor", pagination.ErrInvalidCursor, http.StatusUnprocessableEntity, "validation_failed", "Validation failed", "invalid cursor"},
 		{"unknown", errors.New("boom"), http.StatusInternalServerError, "", "Internal server error", ""},
 	}
 	for _, tc := range cases {

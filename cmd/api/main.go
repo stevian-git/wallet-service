@@ -59,7 +59,7 @@ func main() {
 	idempotencyService := idempotency.New(pool, cfg.IdempotencyLease)
 	reconService := reconciliation.NewService(pool)
 	service := app.New(book, idempotencyService, reconService)
-	handler := httpapi.New(service, logger, cfg.APIKey, pool.Ping)
+	handler := httpapi.New(service, logger, cfg.APIKey, cfg.AllowedOrigins, pool.Ping)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

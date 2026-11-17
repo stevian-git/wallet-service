@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/stevians/wallet-service/internal/platform/telemetry"
@@ -57,23 +58,22 @@ func (p *KafkaPublisher) Publish(ctx context.Context, event Event) error {
 	)
 	defer span.End()
 
-	headers := make([]kgo.RecordHeader, 0, len(event.Headers)+2)
+	// Copy before injecting: the stored traceparent belongs to the request
+	// that wrote the outbox row, and the record must carry the publish span.
+	// Injecting into a copy replaces it and leaves the caller's event intact.
+	values := make(map[string]string, len(event.Headers)+2)
 	for key, value := range event.Headers {
-		headers = append(headers, kgo.RecordHeader{Key: key, Value: []byte(value)})
+		values[key] = value
 	}
-	telemetry.InjectTrace(ctx, event.Headers)
-	for key, value := range event.Headers {
-		alreadyPresent := false
-		for _, h := range headers {
-			if h.Key == key {
-				h.Value = []byte(value)
-				alreadyPresent = true
-				break
-			}
-		}
-		if !alreadyPresent {
-			headers = append(headers, kgo.RecordHeader{Key: key, Value: []byte(value)})
-		}
+	telemetry.InjectTrace(ctx, values)
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	headers := make([]kgo.RecordHeader, 0, len(keys))
+	for _, key := range keys {
+		headers = append(headers, kgo.RecordHeader{Key: key, Value: []byte(values[key])})
 	}
 
 	record := &kgo.Record{
