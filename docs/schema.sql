@@ -178,6 +178,26 @@ CREATE INDEX outbox_unpublished_idx ON outbox_events (id) WHERE published_at IS 
 -- -----------------------------------------------------------------------------
 -- Reconciliation
 -- -----------------------------------------------------------------------------
+-- Provider settlement terdaftar (0003, ADR 0008): batas hari bisnis per provider
+-- dan akun system_bank milik provider per mata uang. Topup/withdrawal lewat
+-- provider memposting ke akun itu, sehingga run hanya membandingkan transfer
+-- milik provider pemilik file.
+CREATE TABLE settlement_providers (
+  provider    text        PRIMARY KEY CHECK (provider ~ '^[a-z0-9_]{1,64}$'),
+  cutoff_tz   text        NOT NULL,                   -- nama zona IANA, divalidasi di Go
+  cutoff_time time        NOT NULL,                   -- akhir hari bisnis lokal; 00:00 = tengah malam di akhir tanggal
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE settlement_provider_accounts (
+  provider   text    NOT NULL REFERENCES settlement_providers (provider),
+  currency   char(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
+  account_id uuid    NOT NULL UNIQUE,
+  PRIMARY KEY (provider, currency),
+  FOREIGN KEY (account_id, currency) REFERENCES accounts (id, currency) -- akun harus bermata uang sama
+);
+
 CREATE TABLE settlement_files (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   provider        text        NOT NULL,               -- 'mock_bank_a', 'mock_ewallet_b'
@@ -222,7 +242,13 @@ CREATE TABLE reconciliation_runs (
   -- Retry dengan backoff (0002): attempts naik setiap kali worker mengambil run;
   -- run yang workernya mati baru bisa diambil lagi setelah next_attempt_at.
   attempts          int          NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-  next_attempt_at   timestamptz  NOT NULL DEFAULT now()
+  next_attempt_at   timestamptz  NOT NULL DEFAULT now(),
+  -- Scope transfer yang dipakai run, diisi saat selesai (0003). scope_provider
+  -- NULL = provider belum terdaftar, scope lama (semua transfer, hari UTC).
+  scope_start       timestamptz,
+  scope_end         timestamptz,
+  scope_provider    text,
+  CONSTRAINT reconciliation_runs_scope_order CHECK (scope_end > scope_start)
 );
 
 -- Paling banyak satu run aktif per file (0002)
@@ -327,7 +353,8 @@ GRANT SELECT, INSERT ON ledger_entries, audit_log, settlement_files, settlement_
 -- Boleh berubah, tetapi hanya kolom yang memang perlu berubah
 GRANT SELECT, INSERT ON
   accounts, account_balances, transfers, holds, idempotency_keys, outbox_events,
-  reconciliation_runs, reconciliation_discrepancies
+  reconciliation_runs, reconciliation_discrepancies,
+  settlement_providers, settlement_provider_accounts
 TO ledger_app;
 
 GRANT UPDATE (status)                                                      ON accounts                     TO ledger_app;
@@ -341,6 +368,8 @@ GRANT UPDATE (attempts, next_attempt_at)                                   ON re
 -- Satu-satunya kolom settlement_files yang boleh berubah: penanda file koreksi (0002)
 GRANT UPDATE (superseded_by)                                               ON settlement_files             TO ledger_app;
 GRANT UPDATE (resolution, note)                                            ON reconciliation_discrepancies TO ledger_app;
+GRANT UPDATE (scope_start, scope_end, scope_provider)                      ON reconciliation_runs          TO ledger_app;
+GRANT UPDATE (cutoff_tz, cutoff_time, updated_at)                          ON settlement_providers         TO ledger_app;
 
 -- Pembersihan key idempotency yang sudah kedaluwarsa
 GRANT DELETE ON idempotency_keys TO ledger_app;

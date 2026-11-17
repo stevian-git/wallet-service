@@ -33,6 +33,9 @@ func TestFromMapsDomainErrors(t *testing.T) {
 		{"invalid settlement file", fmt.Errorf("%w: row 3: bad amount", reconciliation.ErrInvalidSettlementFile), http.StatusUnprocessableEntity, "validation_failed", "Validation failed", "invalid settlement file: row 3: bad amount"},
 		{"run in progress", reconciliation.ErrRunInProgress, http.StatusConflict, "run_in_progress", "Reconciliation run in progress", "a reconciliation run for this file is already in progress"},
 		{"file superseded", reconciliation.ErrFileSuperseded, http.StatusConflict, "file_superseded", "Settlement file superseded", "settlement file has been superseded by a newer file"},
+		{"unknown provider", fmt.Errorf("%w: no IDR account for provider \"x\"", ledger.ErrUnknownProvider), http.StatusUnprocessableEntity, "unknown_provider", "Unknown settlement provider", "unknown settlement provider: no IDR account for provider \"x\""},
+		{"invalid provider", fmt.Errorf("%w: bad", reconciliation.ErrInvalidProvider), http.StatusUnprocessableEntity, "validation_failed", "Validation failed", "invalid settlement provider: bad"},
+		{"provider not found", reconciliation.ErrProviderNotFound, http.StatusNotFound, "not_found", "Not found", "settlement provider not found"},
 		{"invalid cursor", pagination.ErrInvalidCursor, http.StatusUnprocessableEntity, "validation_failed", "Validation failed", "invalid cursor"},
 		{"unknown", errors.New("boom"), http.StatusInternalServerError, "", "Internal server error", ""},
 	}

@@ -18,7 +18,7 @@ func (l *Ledger) Topup(ctx context.Context, tx pgx.Tx, input TopupInput) (Transf
 	if err := validateAmountAndCurrency(input.Amount, input.Currency); err != nil {
 		return Transfer{}, err
 	}
-	bankID, err := l.systemBankAccount(ctx, tx, input.Currency)
+	bankID, err := l.bankAccountFor(ctx, tx, input.Provider, input.Currency)
 	if err != nil {
 		return Transfer{}, err
 	}
@@ -41,7 +41,7 @@ func (l *Ledger) Withdrawal(ctx context.Context, tx pgx.Tx, input WithdrawalInpu
 	if err := validateAmountAndCurrency(input.Amount, input.Currency); err != nil {
 		return Transfer{}, err
 	}
-	bankID, err := l.systemBankAccount(ctx, tx, input.Currency)
+	bankID, err := l.bankAccountFor(ctx, tx, input.Provider, input.Currency)
 	if err != nil {
 		return Transfer{}, err
 	}
@@ -84,6 +84,17 @@ func validateAmountAndCurrency(amount int64, currency string) error {
 		return fmt.Errorf("%w: invalid currency %q", ErrInvalidPosting, currency)
 	}
 	return nil
+}
+
+// bankAccountFor is the bank-side account of a top-up or withdrawal: the
+// provider's own account when a provider is given (so reconciliation can scope
+// a provider's file to the transfers it settles), the shared system:bank
+// account otherwise.
+func (l *Ledger) bankAccountFor(ctx context.Context, tx pgx.Tx, provider *string, currency string) (uuid.UUID, error) {
+	if provider == nil {
+		return l.systemBankAccount(ctx, tx, currency)
+	}
+	return providerBankAccount(ctx, tx, *provider, currency)
 }
 
 func (l *Ledger) systemBankAccount(ctx context.Context, tx pgx.Tx, currency string) (uuid.UUID, error) {

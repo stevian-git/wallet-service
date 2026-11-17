@@ -253,6 +253,15 @@ export function ReconciliationPage() {
           </Card>
         </div>
 
+        {run.scope_start && run.scope_end && (
+          <p className="text-sm text-muted-foreground">
+            Scope: transfers created {formatDate(run.scope_start)} – {formatDate(run.scope_end)}
+            {run.scope_provider
+              ? ` posted against ${run.scope_provider}'s bank account`
+              : ' (provider not registered: all referenced transfers of the UTC day)'}
+          </p>
+        )}
+
         <DiscrepanciesTable runId={runId} />
       </div>
     )

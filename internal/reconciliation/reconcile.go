@@ -103,15 +103,22 @@ func (r *Reconciler) Execute(ctx context.Context, run ReconciliationRun) error {
 		return err
 	}
 
-	var settlementDate time.Time
+	var (
+		provider       string
+		settlementDate time.Time
+	)
 	err = tx.QueryRow(ctx, `
-		SELECT settlement_date FROM settlement_files WHERE id = $1
-	`, run.FileID).Scan(&settlementDate)
+		SELECT provider, settlement_date FROM settlement_files WHERE id = $1
+	`, run.FileID).Scan(&provider, &settlementDate)
 	if err != nil {
-		return fmt.Errorf("lookup settlement date: %w", err)
+		return fmt.Errorf("lookup settlement file: %w", err)
+	}
+	scope, err := resolveScope(ctx, tx, provider, settlementDate)
+	if err != nil {
+		return err
 	}
 
-	settlements, transfers, err := openScopeCursors(ctx, tx, run.FileID, settlementDate)
+	settlements, transfers, err := openScopeCursors(ctx, tx, run.FileID, scope)
 	if err != nil {
 		return err
 	}
@@ -126,9 +133,10 @@ func (r *Reconciler) Execute(ctx context.Context, run ReconciliationRun) error {
 
 	tag, err := tx.Exec(ctx, `
 		UPDATE reconciliation_runs
-		SET status = 'completed', finished_at = $2, matched_count = $3, discrepancy_count = $4
+		SET status = 'completed', finished_at = $2, matched_count = $3, discrepancy_count = $4,
+		    scope_start = $5, scope_end = $6, scope_provider = $7
 		WHERE id = $1 AND status = 'running'
-	`, run.ID, time.Now().UTC(), matchedCount, sink.total)
+	`, run.ID, time.Now().UTC(), matchedCount, sink.total, scope.Start, scope.End, scope.Provider)
 	if err != nil {
 		return fmt.Errorf("update run: %w", err)
 	}
@@ -192,10 +200,24 @@ const (
 	discrepancyBatchSize = 5000
 )
 
-func openScopeCursors(ctx context.Context, tx pgx.Tx, fileID uuid.UUID, settlementDate time.Time) (rowStream[SettlementRecord], rowStream[transferRow], error) {
-	dayStart := settlementDate.UTC().Truncate(24 * time.Hour)
-	dayEnd := dayStart.Add(24 * time.Hour)
+// transferScopeQuery selects the in-scope transfers ordered for the merge.
+// With a provider, only transfers posted against one of its bank accounts are
+// in scope (ADR 0008); the source and destination indexes serve both legs.
+const transferScopeQuery = `
+		DECLARE transfer_cur NO SCROLL CURSOR FOR
+		SELECT t.id, t.reference, t.amount, t.currency, t.status,
+		       EXISTS(SELECT 1 FROM transfers r WHERE r.reverses_transfer_id = t.id) AS has_reversal
+		  FROM transfers t
+		 WHERE t.reference IS NOT NULL
+		   AND t.type != 'reversal'
+		   AND t.status = 'posted'
+		   AND t.created_at >= $1
+		   AND t.created_at < $2`
 
+const transferScopeOrder = `
+		 ORDER BY t.reference COLLATE "C", t.created_at, t.id`
+
+func openScopeCursors(ctx context.Context, tx pgx.Tx, fileID uuid.UUID, scope runScope) (rowStream[SettlementRecord], rowStream[transferRow], error) {
 	_, err := tx.Exec(ctx, `
 		DECLARE settlement_cur NO SCROLL CURSOR FOR
 		SELECT id, file_id, provider_ref, our_reference, amount, currency, status, occurred_at
@@ -205,17 +227,17 @@ func openScopeCursors(ctx context.Context, tx pgx.Tx, fileID uuid.UUID, settleme
 	if err != nil {
 		return nil, nil, fmt.Errorf("open settlement cursor: %w", err)
 	}
-	_, err = tx.Exec(ctx, `
-		DECLARE transfer_cur NO SCROLL CURSOR FOR
-		SELECT t.id, t.reference, t.amount, t.currency, t.status,
-		       EXISTS(SELECT 1 FROM transfers r WHERE r.reverses_transfer_id = t.id) AS has_reversal
-		  FROM transfers t
-		 WHERE t.reference IS NOT NULL
-		   AND t.type != 'reversal'
-		   AND t.status = 'posted'
-		   AND t.created_at >= $1
-		   AND t.created_at < $2
-		 ORDER BY t.reference COLLATE "C", t.created_at, t.id`, dayStart, dayEnd)
+	if scope.Provider == nil {
+		_, err = tx.Exec(ctx, transferScopeQuery+transferScopeOrder, scope.Start, scope.End)
+	} else {
+		accounts := make([]string, len(scope.Accounts))
+		for i, id := range scope.Accounts {
+			accounts[i] = id.String()
+		}
+		_, err = tx.Exec(ctx, transferScopeQuery+`
+		   AND (t.source_account_id = ANY($3::uuid[]) OR t.destination_account_id = ANY($3::uuid[]))`+
+			transferScopeOrder, scope.Start, scope.End, accounts)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("open transfer cursor: %w", err)
 	}

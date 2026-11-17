@@ -13,6 +13,8 @@ import (
 // never drift apart.
 const (
 	accountColumns = `id, kind::text, owner_ref, currency, normal_side::text, allow_negative, status, created_at`
+	// prefixedAccountColumns is accountColumns for queries that alias accounts as "a".
+	prefixedAccountColumns = `a.id, a.kind::text, a.owner_ref, a.currency, a.normal_side::text, a.allow_negative, a.status, a.created_at`
 
 	transferColumns = `id, type::text, status::text, amount, currency,
 		       source_account_id, destination_account_id, reference,

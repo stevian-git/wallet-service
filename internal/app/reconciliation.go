@@ -123,6 +123,9 @@ func reconciliationRunView(run reconciliation.ReconciliationRun) ReconciliationR
 		DiscrepancyCount: run.DiscrepancyCount,
 		Error:            run.Error,
 		Attempts:         run.Attempts,
+		ScopeStart:       run.ScopeStart,
+		ScopeEnd:         run.ScopeEnd,
+		ScopeProvider:    run.ScopeProvider,
 	}
 }
 

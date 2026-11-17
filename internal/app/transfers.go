@@ -44,6 +44,7 @@ func (s *Service) Topup(ctx context.Context, meta Meta, req TopupRequest) (Resul
 			Currency:             req.Currency,
 			Reference:            req.Reference,
 			Metadata:             metadata,
+			Provider:             req.Provider,
 		})
 	})
 }
@@ -91,6 +92,7 @@ func (s *Service) Withdrawal(ctx context.Context, meta Meta, req WithdrawalReque
 			Currency:        req.Currency,
 			Reference:       req.Reference,
 			Metadata:        metadata,
+			Provider:        req.Provider,
 		})
 	})
 }

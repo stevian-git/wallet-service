@@ -68,6 +68,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/holds/{holdId}/capture", s.handleCaptureHold)
 	mux.HandleFunc("POST /v1/holds/{holdId}/release", s.handleReleaseHold)
 	mux.HandleFunc("GET /v1/admin/integrity", s.handleIntegrity)
+	mux.HandleFunc("PUT /v1/admin/settlement-providers/{provider}", s.handlePutSettlementProvider)
+	mux.HandleFunc("GET /v1/admin/settlement-providers", s.handleListSettlementProviders)
 	mux.HandleFunc("POST /v1/reconciliation/settlement-files", s.handleImportSettlementFile)
 	mux.HandleFunc("GET /v1/reconciliation/settlement-files", s.handleListSettlementFiles)
 	mux.HandleFunc("POST /v1/reconciliation/runs", s.handleCreateReconciliationRun)

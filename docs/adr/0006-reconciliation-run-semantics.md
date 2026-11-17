@@ -60,7 +60,8 @@ created for it may still complete.
    first statement locks the run row (`FOR UPDATE SKIP LOCKED`) until commit.
    If the row is locked or the run is no longer `running`, the worker skips it:
    - Loads all `settlement_records` for the file
-   - Loads transfers in scope (non-reversal, with reference, within settlement_date UTC)
+   - Loads transfers in scope (non-reversal, with reference, within the provider's
+     business day and posted against its bank account; see Scope and ADR 0008)
    - Compares by reference, detects discrepancies
    - Batch-inserts discrepancies (500 per batch via `COPY`)
    - Updates run status to `completed` with counts (only while still `running`)
@@ -87,13 +88,17 @@ for a reference failed but the ledger posted the transfer, it is a
 ### Scope
 
 Transfers in scope for a reconciliation run:
-- `created_at` within `[settlement_date 00:00 UTC, +1 day)`
 - `reference IS NOT NULL`
 - `type != 'reversal'`
 - `status = 'posted'`
+- `created_at` within the file provider's business day, and the transfer posts
+  against one of the provider's bank accounts (ADR 0008)
+- If the file's provider is not registered: every transfer that matches the
+  three conditions above, with `created_at` within
+  `[settlement_date 00:00 UTC, +1 day)` (the scope before ADR 0008)
 
-Scope is not filtered by provider, and the day boundary is UTC. ADR 0008
-proposes how to change both.
+Each completed run records the scope it used in `scope_start`, `scope_end`, and
+`scope_provider`.
 
 Settlement records matched by `our_reference` (nullable). Records with
 `our_reference IS NULL` are flagged as `missing_in_ledger`.

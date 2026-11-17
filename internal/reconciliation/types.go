@@ -64,6 +64,12 @@ type ReconciliationRun struct {
 	// worker died becomes claimable again.
 	Attempts      int
 	NextAttemptAt time.Time
+	// The transfer scope the run compared against, set when it completes.
+	// ScopeProvider is nil when the file's provider was not registered and the
+	// legacy scope (every referenced transfer of the UTC day) was used.
+	ScopeStart    *time.Time
+	ScopeEnd      *time.Time
+	ScopeProvider *string
 }
 
 // RetryPolicy bounds how often a run is retried after its worker dies.
@@ -127,4 +133,29 @@ type ListSettlementFilesInput struct {
 type SettlementFilesPage struct {
 	Data       []SettlementFile
 	NextCursor *string
+}
+
+// SettlementProvider is a registered provider: when its business day ends, and
+// its bank account per currency (ADR 0008).
+type SettlementProvider struct {
+	Provider   string
+	CutoffTZ   string
+	CutoffTime string // "HH:MM", local time in CutoffTZ
+	Accounts   []ProviderAccount
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+type ProviderAccount struct {
+	Currency  string
+	AccountID uuid.UUID
+}
+
+// PutProviderInput registers a provider or updates its cut-off. Currencies are
+// only ever added: an account that already has ledger history is never unlinked.
+type PutProviderInput struct {
+	Provider   string
+	CutoffTZ   string
+	CutoffTime string
+	Currencies []string
 }

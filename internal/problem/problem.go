@@ -48,6 +48,8 @@ func From(err error) *Error {
 		return &Error{Status: http.StatusUnprocessableEntity, Code: "account_frozen", Title: "Account frozen", Detail: err.Error()}
 	case errors.Is(err, ledger.ErrCurrencyMismatch):
 		return &Error{Status: http.StatusUnprocessableEntity, Code: "currency_mismatch", Title: "Currency mismatch"}
+	case errors.Is(err, ledger.ErrUnknownProvider):
+		return &Error{Status: http.StatusUnprocessableEntity, Code: "unknown_provider", Title: "Unknown settlement provider", Detail: err.Error()}
 	case errors.Is(err, ledger.ErrAlreadyReversed):
 		return &Error{Status: http.StatusConflict, Code: "already_reversed", Title: "Transfer already reversed"}
 	case errors.Is(err, ledger.ErrHoldNotActive):
@@ -63,9 +65,11 @@ func From(err error) *Error {
 	case errors.Is(err, pagination.ErrInvalidCursor):
 		return &Error{Status: http.StatusUnprocessableEntity, Code: "validation_failed", Title: "Validation failed", Detail: err.Error()}
 	case errors.Is(err, reconciliation.ErrRunNotFound),
-		errors.Is(err, reconciliation.ErrFileNotFound):
+		errors.Is(err, reconciliation.ErrFileNotFound),
+		errors.Is(err, reconciliation.ErrProviderNotFound):
 		return &Error{Status: http.StatusNotFound, Code: "not_found", Title: "Not found", Detail: err.Error()}
-	case errors.Is(err, reconciliation.ErrInvalidSettlementFile):
+	case errors.Is(err, reconciliation.ErrInvalidSettlementFile),
+		errors.Is(err, reconciliation.ErrInvalidProvider):
 		return &Error{Status: http.StatusUnprocessableEntity, Code: "validation_failed", Title: "Validation failed", Detail: err.Error()}
 	case errors.Is(err, reconciliation.ErrDuplicateFile):
 		return &Error{Status: http.StatusConflict, Code: "duplicate_file", Title: "Duplicate file", Detail: err.Error()}

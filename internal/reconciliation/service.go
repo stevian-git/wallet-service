@@ -21,7 +21,8 @@ var (
 // Index name from migration 0002, used to tell unique violations apart.
 const constraintOneActiveRunPerFile = "recon_runs_one_active_per_file"
 
-const runColumns = `id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error, attempts, next_attempt_at`
+const runColumns = `id, file_id, status, started_at, finished_at, matched_count, discrepancy_count, error, attempts, next_attempt_at,
+	scope_start, scope_end, scope_provider`
 
 func scanRun(row pgx.Row) (ReconciliationRun, error) {
 	var run ReconciliationRun
@@ -29,6 +30,7 @@ func scanRun(row pgx.Row) (ReconciliationRun, error) {
 		&run.ID, &run.FileID, &run.Status, &run.StartedAt,
 		&run.FinishedAt, &run.MatchedCount, &run.DiscrepancyCount, &run.Error,
 		&run.Attempts, &run.NextAttemptAt,
+		&run.ScopeStart, &run.ScopeEnd, &run.ScopeProvider,
 	)
 	return run, err
 }
