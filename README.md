@@ -287,7 +287,8 @@ make chaos
 
 `scripts/chaos.sh` orchestrates:
 
-1. Start outbox relay and k6 load (managed processes).
+1. Start the outbox relay (`bin/relay`, built by `make chaos`) and k6 load.
+   Stop any relay you started yourself first.
 2. Terminate Postgres backends (except chaos script's own PID).
 3. Stop Kafka for 30s.
 4. Kill the relay and restart after 10s.
