@@ -91,7 +91,7 @@ reconciler: up-db
 	go run ./cmd/reconciler
 
 mock-settlement: up-db
-	DATABASE_URL='$(DATABASE_URL)' API_KEY='$(API_KEY)' go run ./cmd/mock-settlement $(MOCK_OUTPUT) $(MOCK_DATE)
+	DATABASE_URL='$(DATABASE_URL)' go run ./cmd/mock-settlement $(MOCK_OUTPUT) $(MOCK_DATE)
 
 kafka-topic: up-kafka
 	docker compose exec redpanda rpk topic create '$(KAFKA_TOPIC)' -p 3 -r 1 || true

@@ -11,27 +11,30 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stevians/wallet-service/internal/platform/bootstrap"
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/db"
 	"github.com/stevians/wallet-service/internal/platform/log"
 )
 
 func main() {
-	cfg, err := config.Load()
+	cfg, err := config.LoadTool()
 	if err != nil {
-		slog.Error("load config", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("load config", err)
 	}
+	slog.SetDefault(log.New(cfg.LogLevel))
+	if err := run(cfg); err != nil {
+		bootstrap.Exit("mock settlement", err)
+	}
+}
 
-	logger := log.New(cfg.LogLevel)
-	slog.SetDefault(logger)
-
+func run(cfg config.ToolConfig) error {
+	logger := slog.Default()
 	ctx := context.Background()
 
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	pool, err := db.OpenApp(ctx, cfg.DatabaseURL)
 	if err != nil {
-		logger.Error("open database", "error", err)
-		os.Exit(1)
+		return err
 	}
 	defer pool.Close()
 
@@ -44,8 +47,7 @@ func main() {
 	if len(os.Args) > 2 {
 		parsed, parseErr := time.Parse("2006-01-02", os.Args[2])
 		if parseErr != nil {
-			logger.Error("invalid date format, use YYYY-MM-DD", "error", parseErr)
-			os.Exit(1)
+			return fmt.Errorf("invalid date %q, use YYYY-MM-DD: %w", os.Args[2], parseErr)
 		}
 		settlementDate = parsed
 	}
@@ -57,18 +59,17 @@ func main() {
 
 	transfers, err := loadTransfersForDate(ctx, pool, settlementDate)
 	if err != nil {
-		logger.Error("load transfers", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("load transfers: %w", err)
 	}
 
 	logger.Info("loaded transfers", "count", len(transfers))
 
 	if err := writeMockCSV(outputFile, transfers); err != nil {
-		logger.Error("write csv", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("write csv: %w", err)
 	}
 
 	logger.Info("mock settlement generated", "file", outputFile, "records", len(transfers))
+	return nil
 }
 
 type transferRecord struct {

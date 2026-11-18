@@ -1,55 +1,42 @@
 package main
 
 import (
-	"context"
-	"log/slog"
-	"os"
-	"os/signal"
-	"syscall"
+	"fmt"
 
 	"github.com/stevians/wallet-service/internal/outbox"
+	"github.com/stevians/wallet-service/internal/platform/bootstrap"
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/db"
-	"github.com/stevians/wallet-service/internal/platform/log"
-	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 func main() {
 	cfg, err := config.LoadRelay()
 	if err != nil {
-		slog.Error("load config", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("load config", err)
 	}
-
-	logger := log.New(cfg.LogLevel)
-	slog.SetDefault(logger)
-
-	tracing, err := telemetry.InitTracing(context.Background(), "wallet-relay")
+	proc, err := bootstrap.Start("wallet-relay", cfg.LogLevel)
 	if err != nil {
-		logger.Error("init tracing", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("start", err)
 	}
-	defer tracing.Shutdown(context.Background())
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	err = run(proc, cfg)
+	proc.Close()
 	if err != nil {
-		logger.Error("open database", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("outbox relay stopped", err)
+	}
+}
+
+func run(proc *bootstrap.Process, cfg config.RelayConfig) error {
+	ctx, logger := proc.Ctx, proc.Logger
+
+	pool, err := db.OpenApp(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
 	}
 	defer pool.Close()
 
-	if err := db.VerifyAppRole(ctx, pool); err != nil {
-		logger.Error("database role check failed", "error", err)
-		os.Exit(1)
-	}
-
 	publisher, err := outbox.NewKafkaPublisher(cfg.Brokers, cfg.Topic)
 	if err != nil {
-		logger.Error("create kafka publisher", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("create kafka publisher: %w", err)
 	}
 	defer publisher.Close()
 
@@ -60,8 +47,8 @@ func main() {
 		"batch_size", cfg.BatchSize,
 	)
 	if err := relay.Run(ctx); err != nil {
-		logger.Error("outbox relay stopped", "error", err)
-		os.Exit(1)
+		return err
 	}
 	logger.Info("outbox relay stopped")
+	return nil
 }

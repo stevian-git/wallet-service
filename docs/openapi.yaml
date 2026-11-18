@@ -781,6 +781,9 @@ components:
             - hold_expired
             - not_found
             - unknown_provider
+            - duplicate_file
+            - run_in_progress
+            - file_superseded
         request_id:
           type: string
 

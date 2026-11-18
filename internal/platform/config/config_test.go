@@ -70,3 +70,19 @@ func TestLoadAPIAllowedOrigins(t *testing.T) {
 		t.Fatalf("AllowedOrigins = %q", cfg.AllowedOrigins)
 	}
 }
+
+func TestLoadToolNeedsOnlyDatabaseURL(t *testing.T) {
+	t.Setenv("API_KEY", "")
+	t.Setenv("DATABASE_URL", "")
+	if _, err := LoadTool(); err == nil {
+		t.Fatal("LoadTool without DATABASE_URL succeeded")
+	}
+	t.Setenv("DATABASE_URL", "postgres://x")
+	cfg, err := LoadTool()
+	if err != nil {
+		t.Fatalf("LoadTool without API_KEY: %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://x" {
+		t.Fatalf("DatabaseURL = %q", cfg.DatabaseURL)
+	}
+}

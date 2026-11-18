@@ -39,6 +39,21 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+// OpenApp opens the pool for a runtime process and refuses to hand it out if
+// the role could mutate append-only tables (see VerifyAppRole). The API and
+// every worker open the database through it.
+func OpenApp(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	pool, err := Open(ctx, databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	if err := VerifyAppRole(ctx, pool); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("database role check failed: %w", err)
+	}
+	return pool, nil
+}
+
 // VerifyAppRole refuses to start when the application could update or delete
 // append-only ledger tables. It is the runtime guard for the privilege model
 // established by the migration GRANTs.

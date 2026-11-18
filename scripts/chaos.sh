@@ -161,6 +161,13 @@ check_event_consistency() {
 # --- preflight ---------------------------------------------------------------
 
 log "preflight"
+# Any relay already running (a manual `make relay`, or one orphaned by an
+# earlier run) would keep publishing through the relay-kill step and hide
+# whether the restarted relay recovers the backlog.
+if pgrep -x relay >/dev/null; then
+  log "ERROR: a relay process is already running (pgrep -x relay: $(pgrep -x relay | tr '\n' ' ')); stop it first"
+  exit 1
+fi
 wait_for_api 30
 wait_for_kafka_healthy 30
 
@@ -210,7 +217,7 @@ if kill -0 "$RELAY_PID" 2>/dev/null; then
   kill -9 "$RELAY_PID"
   wait "$RELAY_PID" 2>/dev/null || true
   RELAY_PID=""
-  if pgrep -f "$RELAY_BIN" >/dev/null; then
+  if pgrep -x relay >/dev/null; then
     log "ERROR: a relay process is still running after the kill"
     exit 1
   fi
