@@ -22,6 +22,7 @@ type TopupRequest struct {
 	Currency             string          `json:"currency"`
 	Reference            *string         `json:"reference"`
 	Metadata             json.RawMessage `json:"metadata"`
+	Provider             *string         `json:"provider"`
 }
 
 type TransferRequest struct {
@@ -39,6 +40,14 @@ type WithdrawalRequest struct {
 	Currency        string          `json:"currency"`
 	Reference       *string         `json:"reference"`
 	Metadata        json.RawMessage `json:"metadata"`
+	Provider        *string         `json:"provider"`
+}
+
+// PutSettlementProviderRequest is the body of PUT /v1/admin/settlement-providers/{provider}.
+type PutSettlementProviderRequest struct {
+	CutoffTZ   string   `json:"cutoff_tz"`
+	CutoffTime string   `json:"cutoff_time"`
+	Currencies []string `json:"currencies"`
 }
 
 type ReversalRequest struct {

@@ -152,3 +152,26 @@ func (s *Server) handleListSettlementFiles(w http.ResponseWriter, r *http.Reques
 
 	s.writeJSON(w, http.StatusOK, page)
 }
+
+func (s *Server) handlePutSettlementProvider(w http.ResponseWriter, r *http.Request) {
+	body, err := readRequiredJSON[app.PutSettlementProviderRequest](s, r)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	view, err := s.app.PutSettlementProvider(r.Context(), s.meta(r, body.Raw), r.PathValue("provider"), body.Request)
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleListSettlementProviders(w http.ResponseWriter, r *http.Request) {
+	view, err := s.app.ListSettlementProviders(r.Context())
+	if err != nil {
+		s.writeProblem(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, view)
+}

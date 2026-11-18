@@ -15,4 +15,7 @@ var (
 	ErrNoTransaction     = errors.New("no transaction")
 	ErrHoldNotActive     = errors.New("hold is not active")
 	ErrHoldExpired       = errors.New("hold expired")
+	// ErrUnknownProvider means no bank account is registered for the provider
+	// and currency of a top-up or withdrawal.
+	ErrUnknownProvider = errors.New("unknown settlement provider")
 )

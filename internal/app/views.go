@@ -257,6 +257,9 @@ type ReconciliationRunView struct {
 	DiscrepancyCount int        `json:"discrepancy_count"`
 	Error            *string    `json:"error"`
 	Attempts         int        `json:"attempts"`
+	ScopeStart       *time.Time `json:"scope_start"`
+	ScopeEnd         *time.Time `json:"scope_end"`
+	ScopeProvider    *string    `json:"scope_provider"`
 }
 
 type ReconciliationRunsPageView struct {

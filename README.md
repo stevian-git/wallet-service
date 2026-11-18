@@ -122,6 +122,35 @@ original response and sets `Idempotent-Replayed: true`.
 
 ## Reconciliation
 
+Register each settlement provider once, with the time its business day ends.
+This creates the provider's own bank account per currency
+(see `docs/adr/0008-reconciliation-provider-scope-and-cutoff.md`):
+
+```bash
+curl -s -X PUT http://localhost:8080/v1/admin/settlement-providers/mock_bank_a \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev_api_key' \
+  -d '{"cutoff_tz":"Asia/Jakarta","cutoff_time":"23:00","currencies":["IDR"]}'
+```
+
+Top-ups and withdrawals settled by that provider name it, so they post against
+its account:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/topups \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dev_api_key' \
+  -H 'Idempotency-Key: topup-bank-a-1' \
+  -d '{"destination_account_id":"ACCOUNT_ID","amount":100000,"currency":"IDR","reference":"bank-a-ref-1","provider":"mock_bank_a"}'
+```
+
+A run for a registered provider's file compares only the transfers posted
+against that provider's accounts, within its business day. For settlement
+date D with a 23:00 Asia/Jakarta cut-off, that is from 23:00 WIB on D-1 up to
+23:00 WIB on D. A file from an unregistered provider is compared against
+every referenced transfer of the UTC day, as before. Each run records the
+scope it used (`scope_start`, `scope_end`, `scope_provider`).
+
 Import a settlement CSV file (columns: `provider_ref,our_reference,amount,currency,status,occurred_at`):
 
 ```bash

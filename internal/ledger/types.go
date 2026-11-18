@@ -134,6 +134,9 @@ type TopupInput struct {
 	Currency             string
 	Reference            *string
 	Metadata             json.RawMessage
+	// Provider, when set, posts against that settlement provider's bank
+	// account instead of the shared system:bank account.
+	Provider *string
 }
 
 type TransferInput struct {
@@ -151,6 +154,8 @@ type WithdrawalInput struct {
 	Currency        string
 	Reference       *string
 	Metadata        json.RawMessage
+	// Provider: see TopupInput.Provider.
+	Provider *string
 }
 
 type CreateHoldInput struct {

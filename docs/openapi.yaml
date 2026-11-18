@@ -619,6 +619,56 @@ paths:
               schema:
                 $ref: '#/components/schemas/IntegrityReport'
 
+  /v1/admin/settlement-providers:
+    get:
+      tags: [Admin]
+      summary: Daftar provider settlement terdaftar
+      operationId: listSettlementProviders
+      responses:
+        '200':
+          description: Daftar provider
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SettlementProvider'
+
+  /v1/admin/settlement-providers/{provider}:
+    put:
+      tags: [Admin]
+      summary: Daftarkan provider settlement atau ubah cut-off-nya
+      description: >
+        Idempotent tanpa Idempotency-Key: mengulang PUT tidak mengubah apa pun. Membuat akun
+        system_bank milik provider untuk mata uang yang belum punya; mata uang yang sudah
+        tertaut tidak pernah dilepas. Perubahan cut-off berlaku untuk run berikutnya (setiap
+        run mencatat scope yang dipakainya). Tercatat di audit_log.
+      operationId: putSettlementProvider
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-z0-9_]{1,64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PutSettlementProviderRequest'
+      responses:
+        '200':
+          description: Provider seperti yang tersimpan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementProvider'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
   /healthz:
     get:
       tags: [Ops]
@@ -730,6 +780,7 @@ components:
             - hold_not_active
             - hold_expired
             - not_found
+            - unknown_provider
         request_id:
           type: string
 
@@ -785,6 +836,13 @@ components:
           type: string
           description: Referensi dari provider (dipakai saat rekonsiliasi)
         metadata: { type: object, additionalProperties: true }
+        provider:
+          type: string
+          description: >
+            Provider settlement terdaftar (lihat /v1/admin/settlement-providers). Bila diisi,
+            topup diposting ke akun bank milik provider itu sehingga rekonsiliasi file provider
+            tersebut hanya membandingkan transfer miliknya (ADR 0008). Provider/mata uang yang
+            tidak terdaftar menghasilkan 422 unknown_provider. Kosong = akun system:bank bersama.
 
     TransferRequest:
       type: object
@@ -806,6 +864,9 @@ components:
         currency: { type: string, pattern: '^[A-Z]{3}$' }
         reference: { type: string }
         metadata: { type: object, additionalProperties: true }
+        provider:
+          type: string
+          description: Sama seperti TopupRequest.provider
 
     Transfer:
       type: object
@@ -904,6 +965,58 @@ components:
         attempts:
           type: integer
           description: Berapa kali run diambil worker; run gagal permanen setelah batas percobaan
+        scope_start:
+          type: string
+          format: date-time
+          nullable: true
+          description: Awal rentang created_at transfer yang dibandingkan (inklusif); terisi saat run selesai
+        scope_end:
+          type: string
+          format: date-time
+          nullable: true
+          description: Akhir rentang (eksklusif), mengikuti cut-off provider
+        scope_provider:
+          type: string
+          nullable: true
+          description: >
+            Provider yang membatasi scope (hanya transfer yang memposting ke akun bank provider).
+            null = provider file belum terdaftar; scope lama dipakai (semua transfer ber-reference, hari UTC).
+
+    SettlementProvider:
+      type: object
+      required: [provider, cutoff_tz, cutoff_time, accounts, created_at, updated_at]
+      properties:
+        provider: { type: string, pattern: '^[a-z0-9_]{1,64}$' }
+        cutoff_tz: { type: string, example: Asia/Jakarta }
+        cutoff_time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          example: '23:00'
+          description: >
+            Akhir hari bisnis lokal. Hari settlement D = [D-1 cutoff, D cutoff) di cutoff_tz;
+            00:00 berarti tengah malam di akhir D (hari kalender D).
+        accounts:
+          type: array
+          items:
+            type: object
+            required: [currency, account_id]
+            properties:
+              currency: { type: string, pattern: '^[A-Z]{3}$' }
+              account_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PutSettlementProviderRequest:
+      type: object
+      required: [cutoff_tz, cutoff_time, currencies]
+      properties:
+        cutoff_tz: { type: string, description: Nama zona waktu IANA, example: Asia/Jakarta }
+        cutoff_time: { type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$', example: '23:00' }
+        currencies:
+          type: array
+          minItems: 1
+          items: { type: string, pattern: '^[A-Z]{3}$' }
+          description: Mata uang yang dibuatkan akun bank provider. Hanya bisa ditambah, tidak dihapus.
 
     Discrepancy:
       type: object

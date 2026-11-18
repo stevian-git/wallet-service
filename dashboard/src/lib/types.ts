@@ -66,6 +66,9 @@ export interface ReconciliationRun {
   discrepancy_count: number;
   error: string | null;
   attempts: number;
+  scope_start: string | null;
+  scope_end: string | null;
+  scope_provider: string | null;
 }
 
 export interface Discrepancy {
