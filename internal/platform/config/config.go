@@ -78,6 +78,25 @@ func Load() (Config, error) {
 	}, nil
 }
 
+// ToolConfig is for command-line tools that only read the database (for
+// example cmd/mock-settlement); they need no API key.
+type ToolConfig struct {
+	DatabaseURL string
+	LogLevel    slog.Level
+}
+
+func LoadTool() (ToolConfig, error) {
+	databaseURL, err := requireDatabaseURL()
+	if err != nil {
+		return ToolConfig{}, err
+	}
+	level, err := logLevel()
+	if err != nil {
+		return ToolConfig{}, err
+	}
+	return ToolConfig{DatabaseURL: databaseURL, LogLevel: level}, nil
+}
+
 func LoadHoldSweeper() (HoldSweeperConfig, error) {
 	databaseURL, err := requireDatabaseURL()
 	if err != nil {

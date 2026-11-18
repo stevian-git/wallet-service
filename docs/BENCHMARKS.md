@@ -2,9 +2,9 @@
 
 This document captures load test results and chaos test evidence for the
 wallet service. The numbers come from runs on **2026-11-17** on a developer
-laptop: one Postgres container, one single-node Redpanda, the API and relay as
-native binaries, and k6 on the same machine. They show how the system behaves
-and where the bottlenecks are. They are not production capacity figures.
+laptop (the chaos run from **2026-11-18**): one Postgres container, one
+single-node Redpanda, the API and relay as native binaries, and k6 on the same
+machine. They show how the system behaves and where the bottlenecks are. They are not production capacity figures.
 
 ## How to reproduce
 
@@ -122,39 +122,46 @@ saturation point of the hot wallet needs a run without the 50 ms think time.
 
 ## Chaos evidence
 
-Run: `make chaos` (mixed load, 10 VUs, 120 s).
+Run: `make chaos` (mixed load, 10 VUs, 120 s) on **2026-11-18**, on a freshly
+reset database, with exactly one relay process alive at any time (see
+[Earlier runs](#earlier-runs-relay-kill-not-isolated)).
 
 | Check | Expected | Actual |
 |---|---|---|
 | `/v1/admin/integrity` ok | `true` | `true` (no balance drift, no unbalanced transfers, no posted transfer without entries) |
-| Posted transfers (non-reversal) | — | 106,146 |
-| Published `transfer.posted` events | equal to posted | 106,146 |
-| Kafka records vs outbox rows | ≥ outbox rows (at-least-once) | 106,166 = 106,166 (no duplicates in this run) |
+| Posted transfers (non-reversal) | — | 20,494 |
+| Published `transfer.posted` events | equal to posted | 20,494 |
+| Kafka records vs outbox rows | ≥ outbox rows (at-least-once) | 20,515 = 20,515 (no duplicates in this run) |
+| Events published by the restarted relay | the backlog plus the rest of the run | 6,732 |
 | Outbox drain time (s) | — | < 1 (drained at the first check after k6 finished) |
-| HTTP 5xx during the run | only around the Postgres termination | 10 of 20,703 requests |
-| Load during chaos | — | 172.5 req/s, p95 13.75 ms, p99 17.80 ms |
+| HTTP 5xx during the run | only around the Postgres termination | 10 of 20,522 requests |
+| Load during chaos | — | 170.8 req/s, p95 14.86 ms, p99 19.50 ms |
 | Disruption timeline | pg terminate → kafka 30s stop → relay kill/restart | see `results/chaos-<timestamp>/relay.log` |
 
-The count columns cover every run since the reset (mixed, hot, mixed, chaos),
-because the assertions count the whole database. Outbox rows equal posted
-transfers plus the 20 `account.created` events.
+Outbox rows are the 20,494 `transfer.posted` events plus 21 `account.created`
+events: 20 from the k6 setup and 1 from a smoke check before the run. The
+posted count also includes that smoke check's two top-ups.
 
 Timeline of the recorded run (UTC):
 
 | Time | Event |
 |---|---|
-| 10:35:17 | relay and k6 started |
-| 10:35:22 | all Postgres backends terminated |
-| 10:35:43 | Redpanda stopped |
-| 10:36:13 | Redpanda started (healthy at 10:36:15) |
-| 10:36:40 | relay killed with SIGKILL |
-| 10:36:50 | relay restarted |
-| 10:37:18 | k6 finished; outbox drained; integrity and counts asserted |
+| 07:53:53 | relay and k6 started |
+| 07:53:59 | all Postgres backends terminated |
+| 07:54:19 | Redpanda stopped |
+| 07:54:49 | Redpanda started (healthy at 07:54:51) |
+| 07:55:15 | last event published by the first relay |
+| 07:55:16 | relay killed with SIGKILL |
+| 07:55:26 | relay restarted; first event published |
+| 07:55:31–32 | restarted relay published ~2,700 events in 2 s (the backlog), then followed the load at ~180/s |
+| 07:55:56 | k6 finished; outbox drained; integrity and counts asserted |
 
 - **While Redpanda was down**, the relay logged no errors. `ProduceSync` kept
   retrying inside the client, and publishing resumed when the broker came back.
-- **After the restart**, the new relay picked up the backlog within one poll
-  interval.
+- **After the restart**, the new relay published one event, then paused for
+  about 5 s before draining the backlog. The cause of the pause has not been
+  investigated. The likely cause is the Kafka client's connection and producer
+  initialisation.
 
 The assertion uses a single-statement snapshot of posted transfers and
 published outbox events, so the two counts are read from one consistent
@@ -162,16 +169,31 @@ Postgres read. `published_at IS NOT NULL` only holds after the relay
 successfully `ProduceSync`'d the record to Kafka, so this also validates that
 the broker recovered and the relay drained the backlog.
 
-### Earlier run: relay kill was not exercised
+### Earlier runs: relay kill not isolated
 
-The first chaos run also passed, but it did not test what the timeline claimed.
-The script started the relay with `go run` and killed that PID. Killing
-`go run` leaves the compiled relay running as an orphan, so the "relay kill"
-never happened: the log showed a single `outbox relay started`.
+The runs from 2026-11-17 both passed, but neither tested the relay crash
+cleanly:
 
-`scripts/chaos.sh` now starts the built `bin/relay` (`RELAY_BIN`). It kills
-the relay with SIGKILL and fails if a relay process survives. The run recorded
-above uses the fixed script and shows two relay starts.
+1. **First run.** The script started the relay with `go run` and killed that
+   PID. Killing `go run` leaves the compiled relay running as an orphan, so
+   the relay kill never happened. The log showed a single
+   `outbox relay started`.
+2. **Second run** (after switching to `bin/relay` and SIGKILL). The relay that
+   the first run's restart step had started with `go run` was still running as
+   an orphan. It kept publishing while the script's relay was down. The
+   script's post-kill check missed it, because it matched the `bin/relay` path
+   and the orphan ran from the Go build cache. The integrity and
+   posted-vs-published results of that run hold, but the relay restart was not
+   what drained the backlog.
+
+`scripts/chaos.sh` now:
+- starts the built `bin/relay` (`RELAY_BIN`)
+- refuses to start if any process named `relay` is already running
+- kills the relay with SIGKILL
+- fails if any process named `relay` survives the kill
+
+The run recorded above uses that script. Its log shows two relay starts, with
+no publishes between the kill and the restart.
 
 ## Notes
 

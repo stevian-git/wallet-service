@@ -1,11 +1,7 @@
 package main
 
 import (
-	"context"
-	"log/slog"
-	"os"
-	"os/signal"
-	"syscall"
+	"fmt"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -14,30 +10,29 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/stevians/wallet-service/internal/consumer"
+	"github.com/stevians/wallet-service/internal/platform/bootstrap"
 	"github.com/stevians/wallet-service/internal/platform/config"
-	"github.com/stevians/wallet-service/internal/platform/log"
 	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 func main() {
 	cfg, err := config.LoadConsumer()
 	if err != nil {
-		slog.Error("load config", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("load config", err)
 	}
-
-	logger := log.New(cfg.LogLevel)
-	slog.SetDefault(logger)
-
-	tracing, err := telemetry.InitTracing(context.Background(), "wallet-consumer-demo")
+	proc, err := bootstrap.Start("wallet-consumer-demo", cfg.LogLevel)
 	if err != nil {
-		logger.Error("init tracing", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("start", err)
 	}
-	defer tracing.Shutdown(context.Background())
+	err = run(proc, cfg)
+	proc.Close()
+	if err != nil {
+		bootstrap.Exit("consumer stopped", err)
+	}
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+func run(proc *bootstrap.Process, cfg config.ConsumerConfig) error {
+	ctx, logger := proc.Ctx, proc.Logger
 
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(cfg.Brokers...),
@@ -48,8 +43,7 @@ func main() {
 		kgo.ClientID("wallet-consumer-demo"),
 	)
 	if err != nil {
-		logger.Error("create kafka consumer", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("create kafka consumer: %w", err)
 	}
 	defer client.Close()
 
@@ -131,6 +125,7 @@ func main() {
 		}
 	}
 	logger.Info("consumer stopped")
+	return nil
 }
 
 func headerValue(headers []kgo.RecordHeader, key string) string {

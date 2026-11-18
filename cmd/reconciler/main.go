@@ -5,50 +5,39 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stevians/wallet-service/internal/platform/bootstrap"
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/db"
-	"github.com/stevians/wallet-service/internal/platform/log"
-	"github.com/stevians/wallet-service/internal/platform/telemetry"
 	"github.com/stevians/wallet-service/internal/reconciliation"
 )
 
 func main() {
 	cfg, err := config.LoadReconciler()
 	if err != nil {
-		slog.Error("load config", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("load config", err)
 	}
-
-	logger := log.New(cfg.LogLevel)
-	slog.SetDefault(logger)
-
-	tracing, err := telemetry.InitTracing(context.Background(), "wallet-reconciler")
+	proc, err := bootstrap.Start("wallet-reconciler", cfg.LogLevel)
 	if err != nil {
-		logger.Error("init tracing", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("start", err)
 	}
-	defer tracing.Shutdown(context.Background())
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	err = run(proc, cfg)
+	proc.Close()
 	if err != nil {
-		logger.Error("open database", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("reconciler stopped", err)
+	}
+}
+
+func run(proc *bootstrap.Process, cfg config.ReconcilerConfig) error {
+	ctx, logger := proc.Ctx, proc.Logger
+
+	pool, err := db.OpenApp(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
 	}
 	defer pool.Close()
-
-	if err := db.VerifyAppRole(ctx, pool); err != nil {
-		logger.Error("database role check failed", "error", err)
-		os.Exit(1)
-	}
 
 	recon := reconciliation.NewService(pool)
 	reconciler := recon.Reconciler()
@@ -100,6 +89,7 @@ func main() {
 		logger.Info("reconciliation run completed", "run_id", run.ID)
 	}
 	logger.Info("reconciler worker shutting down")
+	return nil
 }
 
 // execute bounds one run by timeout. The run is a single transaction that holds

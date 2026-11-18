@@ -4,49 +4,38 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/stevians/wallet-service/internal/ledger"
+	"github.com/stevians/wallet-service/internal/platform/bootstrap"
 	"github.com/stevians/wallet-service/internal/platform/config"
 	"github.com/stevians/wallet-service/internal/platform/db"
-	"github.com/stevians/wallet-service/internal/platform/log"
-	"github.com/stevians/wallet-service/internal/platform/telemetry"
 )
 
 func main() {
 	cfg, err := config.LoadHoldSweeper()
 	if err != nil {
-		slog.Error("load config", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("load config", err)
 	}
-
-	logger := log.New(cfg.LogLevel)
-	slog.SetDefault(logger)
-
-	tracing, err := telemetry.InitTracing(context.Background(), "wallet-holdsweeper")
+	proc, err := bootstrap.Start("wallet-holdsweeper", cfg.LogLevel)
 	if err != nil {
-		logger.Error("init tracing", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("start", err)
 	}
-	defer tracing.Shutdown(context.Background())
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	err = run(proc, cfg)
+	proc.Close()
 	if err != nil {
-		logger.Error("open database", "error", err)
-		os.Exit(1)
+		bootstrap.Exit("hold sweeper stopped", err)
+	}
+}
+
+func run(proc *bootstrap.Process, cfg config.HoldSweeperConfig) error {
+	ctx, logger := proc.Ctx, proc.Logger
+
+	pool, err := db.OpenApp(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
 	}
 	defer pool.Close()
-
-	if err := db.VerifyAppRole(ctx, pool); err != nil {
-		logger.Error("database role check failed", "error", err)
-		os.Exit(1)
-	}
 
 	book := ledger.New(pool)
 	logger.Info("hold sweeper started", "interval", cfg.Interval, "batch_size", cfg.BatchSize)
@@ -58,7 +47,7 @@ func main() {
 		select {
 		case <-ctx.Done():
 			logger.Info("hold sweeper stopped")
-			return
+			return nil
 		case <-ticker.C:
 		}
 	}
