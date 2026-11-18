@@ -277,7 +277,9 @@ Run list:
 
 ![Reconciliation runs](docs/screenshots/reconciliation.png)
 
-Run detail with discrepancies (amount mismatch, record missing in ledger):
+Run detail: the transfer scope the run used (the provider's business day,
+23:00–23:00 WIB, and its bank account) and the discrepancies found, here one
+of each kind except duplicate in ledger:
 
 ![Reconciliation run detail](docs/screenshots/reconciliation-run.png)
 
